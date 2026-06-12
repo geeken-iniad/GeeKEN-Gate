@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build and test output
+dist/
+coverage/
+*.tsbuildinfo
+
+# Cloudflare Wrangler local state
+.wrangler/
+
+# Local environment variables and secrets
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+
+# Logs and OS metadata
+*.log
+.DS_Store
+Thumbs.db
