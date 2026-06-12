@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "geeken-gate",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-12",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "geeken-gate",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ]
+}
