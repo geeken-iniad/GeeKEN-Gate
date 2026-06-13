@@ -9,8 +9,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "geeken-gate",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_name": "geeken-gate-db",
+      "database_id": "0af5473b-d6dc-46ec-ae2f-5c1e89c71852"
     }
   ]
 }
