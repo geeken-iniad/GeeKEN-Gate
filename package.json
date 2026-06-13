@@ -7,9 +7,12 @@
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "client:register": "node scripts/register-client.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "pnpm typecheck && pnpm test"
+    "test:ops": "node --test scripts/*.test.mjs",
+    "check": "pnpm typecheck && pnpm test && pnpm test:ops"
   },
   "devEngines": {
     "packageManager": {
