@@ -2,12 +2,14 @@ import { Hono } from 'hono'
 
 import type { AppBindings } from './lib/config'
 import { handleCallback } from './routes/callback'
+import { handleExchange } from './routes/exchange'
 import { handleLogin } from './routes/login'
 
 export const app = new Hono<{ Bindings: AppBindings }>()
 
 app.get('/login', handleLogin)
 app.get('/callback', handleCallback)
+app.post('/exchange', handleExchange)
 
 app.get('/health', async (c) => {
   try {
