@@ -1,8 +1,11 @@
 import { Hono } from 'hono'
 
 import type { AppBindings } from './lib/config'
+import { handleLogin } from './routes/login'
 
 export const app = new Hono<{ Bindings: AppBindings }>()
+
+app.get('/login', handleLogin)
 
 app.get('/health', async (c) => {
   try {
