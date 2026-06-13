@@ -3,6 +3,9 @@
   "name": "geeken-gate",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-12",
+  "triggers": {
+    "crons": ["0 3 * * *"]
+  },
   "d1_databases": [
     {
       "binding": "DB",

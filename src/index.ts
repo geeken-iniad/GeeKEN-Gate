@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 
+import { cleanupExpiredAuthData } from './lib/cleanup'
 import type { AppBindings } from './lib/config'
 import { handleCallback } from './routes/callback'
 import { handleExchange } from './routes/exchange'
@@ -24,4 +25,17 @@ app.get('/health', async (c) => {
   }
 })
 
-export default app
+export const scheduled: ExportedHandlerScheduledHandler<AppBindings> = async (
+  controller,
+  env,
+) => {
+  await cleanupExpiredAuthData(
+    env.DB,
+    Math.floor(controller.scheduledTime / 1000),
+  )
+}
+
+export default {
+  fetch: app.fetch,
+  scheduled,
+} satisfies ExportedHandler<AppBindings>
