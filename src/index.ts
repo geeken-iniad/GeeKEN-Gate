@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 
-export const app = new Hono<{ Bindings: Env }>()
+import type { AppBindings } from './lib/config'
+
+export const app = new Hono<{ Bindings: AppBindings }>()
 
 app.get('/health', async (c) => {
   try {
