@@ -32,6 +32,7 @@ const GITHUB_ACCESS_TOKEN_URL =
   'https://github.com/login/oauth/access_token'
 const GITHUB_API_URL = 'https://api.github.com'
 const GITHUB_API_VERSION = '2026-03-10'
+const GITHUB_API_USER_AGENT = 'GeeKEN-Gate'
 
 type GitHubEndpointErrorCode =
   | 'token_exchange_failed'
@@ -75,6 +76,7 @@ function createApiHeaders(accessToken: string): Record<string, string> {
   return {
     Accept: 'application/vnd.github+json',
     Authorization: `Bearer ${accessToken}`,
+    'User-Agent': GITHUB_API_USER_AGENT,
     'X-GitHub-Api-Version': GITHUB_API_VERSION,
   }
 }

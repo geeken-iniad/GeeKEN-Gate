@@ -104,6 +104,7 @@ describe('authenticateGitHubUser', () => {
         headers: {
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${ACCESS_TOKEN}`,
+          'User-Agent': 'GeeKEN-Gate',
           'X-GitHub-Api-Version': GITHUB_API_VERSION,
         },
       },
@@ -115,6 +116,7 @@ describe('authenticateGitHubUser', () => {
         headers: {
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${ACCESS_TOKEN}`,
+          'User-Agent': 'GeeKEN-Gate',
           'X-GitHub-Api-Version': GITHUB_API_VERSION,
         },
       },
