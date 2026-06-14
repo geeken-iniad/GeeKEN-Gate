@@ -113,6 +113,50 @@ curl --request POST http://127.0.0.1:8787/exchange \
 client secretと`/exchange`はクライアントバックエンド専用です。ブラウザやSPAへ
 client secretを配布しないでください。
 
+## Production OAuth Smoke Test
+
+デプロイ済みWorker、実GitHub OAuth、リモートD1を通した認証フローは、開発者用
+の最小クライアントで手動確認できます。このクライアントは本番アプリでは
+ありません。
+
+検証用clientをリモートD1へ登録します。redirect URIは
+`http://localhost:3000/callback`を使用します。
+
+```bash
+pnpm client:register -- --remote smoke-client http://localhost:3000/callback
+```
+
+表示されたclient secretを、Git管理対象外の`.env.smoke`などへ保存します。
+client secretをリポジトリへコミットしないでください。
+
+```dotenv
+GATE_BASE_URL=https://geeken-gate.example.workers.dev
+SMOKE_CLIENT_ID=smoke-client
+SMOKE_CLIENT_SECRET=<client:registerで一度だけ表示された値>
+SMOKE_REDIRECT_URI=http://localhost:3000/callback
+SMOKE_PORT=3000
+```
+
+環境変数を読み込んでsmoke clientを起動します。
+
+```bash
+set -a
+source .env.smoke
+set +a
+pnpm smoke:client
+```
+
+ブラウザで`http://localhost:3000`を開き、`Start GitHub OAuth login`を選択します。
+GitHub認証後、結果画面で以下を確認します。
+
+1. 1回目の`/exchange`が成功し、GitHub IDとGitHub loginが表示される
+2. 同じcodeを使った2回目の`/exchange`が`invalid_grant`で失敗する
+3. client secretがブラウザ、URL、smoke clientのログへ表示されない
+
+`SMOKE_PORT`を変更する場合は、`SMOKE_REDIRECT_URI`のポートとclient登録時の
+redirect URIも同じ値へ変更してください。登録済みredirect URIとは完全一致が
+必要です。
+
 ## Session And Logout
 
 GitHub callback成功時、認証サーバーは7日間有効な`giken_session` Cookieを

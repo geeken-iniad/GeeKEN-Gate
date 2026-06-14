@@ -9,6 +9,7 @@
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
     "client:register": "node scripts/register-client.mjs",
+    "smoke:client": "node scripts/smoke-client.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:ops": "node --test scripts/*.test.mjs",
