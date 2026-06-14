@@ -6,7 +6,7 @@ Hono、D1ベースの認証サーバーです。
 ## Requirements
 
 - Node.js 24
-- pnpm 11
+- pnpm 11.6.0
 - CloudflareアカウントとWranglerログイン
 - 試験または運用対象のGitHub Organization
 - GitHub OAuth App
@@ -202,7 +202,8 @@ pnpm exec wrangler d1 create geeken-gate
 pnpm db:migrate:remote
 ```
 
-公開設定は通常のWrangler varsではなくsecretsとして登録します。
+公開設定は通常のWrangler varsではなくCloudflare Worker secretsとして事前に
+登録します。
 
 ```bash
 pnpm exec wrangler secret put GITHUB_CLIENT_ID
@@ -212,11 +213,62 @@ pnpm exec wrangler secret put GITHUB_CALLBACK_URL
 pnpm exec wrangler secret put SESSION_SECRET
 ```
 
-GitHub OAuth Appのcallback URLを公開Workerの`/callback`へ変更してから
-デプロイします。
+GitHub OAuth Appのcallback URLを公開Workerの`/callback`へ変更します。
+
+### GitHub Actions CI/CD
+
+本番デプロイはGitHub Actionsの`.github/workflows/deploy.yml`で実行します。
+
+- `master`へのpull request: validationのみを実行し、Cloudflareへのdeployは行いません。
+- `master`へのpush: validation成功後にremote D1 migrationを適用し、Workerをdeployします。
+- manual dispatch: 選択refが`refs/heads/master`の場合だけ、pushと同じdeployを実行します。
+
+CIはNode.js 24とpnpm 11.6.0を使用し、各validationで次のコマンドを実行します。
 
 ```bash
-pnpm deploy
+corepack enable
+corepack prepare pnpm@11.6.0 --activate
+pnpm install --frozen-lockfile
+pnpm check
+```
+
+deploy jobはvalidation成功後、remote Cloudflare accountに対して必ず次の順で実行
+します。
+
+```bash
+pnpm exec wrangler d1 migrations apply DB --remote
+pnpm exec wrangler deploy
+```
+
+GitHub repository secretsには次を登録してください。値はコミットしたりログへ出力
+したりしないでください。
+
+- `CLOUDFLARE_API_TOKEN`: 対象accountでWorkers deployとD1 migrationsに必要な権限を持つCloudflare API token。global API keyは使用しません。
+- `CLOUDFLARE_ACCOUNT_ID`: 対象Cloudflare account ID。
+
+Worker runtime secretsはCloudflare側に次を登録済みにしてください。
+
+- `GITHUB_CLIENT_ID`
+- `GITHUB_CLIENT_SECRET`
+- `GITHUB_ORG`
+- `GITHUB_CALLBACK_URL`
+- `SESSION_SECRET`
+
+GitHub repository variableとして、deploy後のhealth checkに使う公開Worker URLを
+`DEPLOYMENT_URL`へ登録してください。末尾の`/health`は含めません。
+例: `https://geeken-gate.example.workers.dev`
+
+deploy後、workflowは次のhealth checkを実行します。
+
+```bash
+curl --fail --silent --show-error "$DEPLOYMENT_URL/health"
+```
+
+Actions logsでvalidation、remote D1 migrations、`wrangler deploy`、health checkが
+成功していることを確認してください。手元からも次のように確認できます。
+
+```bash
+curl --fail --silent --show-error "https://geeken-gate.example.workers.dev/health"
 ```
 
 Cronは毎日UTC 03:00に実行され、期限切れsession、OAuth state、認証codeと、
