@@ -10,7 +10,7 @@ const NOW = 1_700_000_000
 const CLIENT_SECRET_HASH = 'a'.repeat(64)
 const CLIENT_ID = 'client-a'
 const REDIRECT_URI = 'https://client.example/callback'
-const SESSION_SECRET = 'test-session-secret'
+const SESSION_SECRET = 's'.repeat(32)
 
 afterEach(() => {
   vi.restoreAllMocks()

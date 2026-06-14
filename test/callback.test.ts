@@ -11,7 +11,7 @@ import { allowingRateLimiter } from './rate-limit'
 const NOW = 1_700_000_000
 const CLIENT_ID = 'client-a'
 const REDIRECT_URI = 'https://client.example/callback?source=login'
-const SESSION_SECRET = 'test-session-secret'
+const SESSION_SECRET = 's'.repeat(32)
 const OAUTH_STATE = 'oauth-state-value'
 const GITHUB_CODE = 'github-code'
 const GITHUB_USER = {

@@ -30,7 +30,8 @@ GITHUB_CALLBACK_URL=http://127.0.0.1:8787/callback
 SESSION_SECRET=<32バイト以上のランダム値>
 ```
 
-`SESSION_SECRET`は次のように生成できます。
+`SESSION_SECRET`はUTF-8で32バイト以上を必須とし、短い値は設定読み込み時に
+拒否します。次のコマンドで32バイトのランダム値を生成できます。
 
 ```bash
 openssl rand -hex 32

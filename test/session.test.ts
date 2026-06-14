@@ -7,7 +7,7 @@ import { app } from '../src/index'
 import { allowingRateLimiter } from './rate-limit'
 
 const NOW = 1_700_000_000
-const SESSION_SECRET = 'test-session-secret'
+const SESSION_SECRET = 's'.repeat(32)
 const SESSION = 'session-value'
 const GITHUB_ID = '123456'
 const GITHUB_LOGIN = 'octocat'

@@ -14,7 +14,7 @@ const CLIENT_ID = 'client-a'
 const CLIENT_SECRET = 'client-secret'
 const REDIRECT_URI = 'https://client.example/callback'
 const AUTH_CODE = 'authorization-code'
-const SESSION_SECRET = 'test-session-secret'
+const SESSION_SECRET = 's'.repeat(32)
 const GITHUB_ID = '123456'
 const GITHUB_LOGIN = 'octocat'
 

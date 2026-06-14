@@ -7,6 +7,8 @@ const REQUIRED_STRING_BINDINGS = [
 ] as const
 
 const HTTP_CALLBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
+const MINIMUM_SESSION_SECRET_BYTES = 32
+const textEncoder = new TextEncoder()
 
 type RequiredStringBinding = (typeof REQUIRED_STRING_BINDINGS)[number]
 
@@ -63,6 +65,21 @@ function getCallbackUrl(value: string): URL {
   return callbackUrl
 }
 
+function getSessionSecret(bindings: AppBindings): string {
+  const sessionSecret = getRequiredString(bindings, 'SESSION_SECRET')
+
+  if (
+    textEncoder.encode(sessionSecret).byteLength <
+    MINIMUM_SESSION_SECRET_BYTES
+  ) {
+    throw new Error(
+      `Invalid environment binding: SESSION_SECRET must be at least ${MINIMUM_SESSION_SECRET_BYTES} UTF-8 bytes`,
+    )
+  }
+
+  return sessionSecret
+}
+
 function getDatabase(value: unknown): D1Database {
   if (
     typeof value !== 'object' ||
@@ -90,6 +107,6 @@ export function loadAuthServerConfig(
     githubClientSecret: getRequiredString(bindings, 'GITHUB_CLIENT_SECRET'),
     githubOrg: getRequiredString(bindings, 'GITHUB_ORG'),
     githubCallbackUrl: getCallbackUrl(githubCallbackUrlValue),
-    sessionSecret: getRequiredString(bindings, 'SESSION_SECRET'),
+    sessionSecret: getSessionSecret(bindings),
   }
 }
