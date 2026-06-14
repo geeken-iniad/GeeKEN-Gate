@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AppBindings } from '../src/lib/config'
 import {
@@ -7,6 +7,7 @@ import {
   hashClientSecret,
 } from '../src/lib/crypto'
 import { app } from '../src/index'
+import { allowingRateLimiter } from './rate-limit'
 
 const NOW = 1_700_000_000
 const CLIENT_ID = 'client-a'
@@ -16,6 +17,10 @@ const AUTH_CODE = 'authorization-code'
 const SESSION_SECRET = 'test-session-secret'
 const GITHUB_ID = '123456'
 const GITHUB_LOGIN = 'octocat'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 interface AuthEventRow {
   event_type: string
@@ -29,14 +34,19 @@ interface AuthEventRow {
   user_agent: string | null
 }
 
-function createBindings(): AppBindings {
+function createBindings(
+  overrides: Partial<AppBindings> = {},
+): AppBindings {
   return {
     DB: env.DB,
+    PUBLIC_RATE_LIMITER: allowingRateLimiter,
+    CLIENT_RATE_LIMITER: allowingRateLimiter,
     GITHUB_CLIENT_ID: 'github-client-id',
     GITHUB_CLIENT_SECRET: 'github-client-secret',
     GITHUB_ORG: 'example-org',
     GITHUB_CALLBACK_URL: 'https://auth.example.com/callback',
     SESSION_SECRET,
+    ...overrides,
   }
 }
 
@@ -96,6 +106,7 @@ async function requestExchange(
     authorization?: string | null
     contentType?: string | null
     body?: string
+    bindingOverrides?: Partial<AppBindings>
   } = {},
 ): Promise<Response> {
   const headers = new Headers({
@@ -131,7 +142,7 @@ async function requestExchange(
           redirect_uri: REDIRECT_URI,
         }).toString(),
     },
-    createBindings(),
+    createBindings(options.bindingOverrides),
   )
 }
 
@@ -186,6 +197,29 @@ describe('POST /exchange', () => {
     ])
   })
 
+  it('applies both IP and authenticated-client limits to a valid exchange', async () => {
+    const publicLimiter = {
+      limit: vi.fn().mockResolvedValue({ success: true }),
+    } as RateLimit
+    const clientLimiter = {
+      limit: vi.fn().mockResolvedValue({ success: true }),
+    } as RateLimit
+    const response = await requestExchange({
+      bindingOverrides: {
+        PUBLIC_RATE_LIMITER: publicLimiter,
+        CLIENT_RATE_LIMITER: clientLimiter,
+      },
+    })
+
+    expect(response.status).toBe(200)
+    expect(publicLimiter.limit).toHaveBeenCalledWith({
+      key: 'exchange:ip:203.0.113.20',
+    })
+    expect(clientLimiter.limit).toHaveBeenCalledWith({
+      key: `exchange:client:${CLIENT_ID}`,
+    })
+  })
+
   it('rejects reuse of a consumed code', async () => {
     expect((await requestExchange()).status).toBe(200)
 
@@ -201,6 +235,93 @@ describe('POST /exchange', () => {
       success: 0,
       reason: 'invalid_code',
     })
+  })
+
+  it('rejects a rate-limited IP before accessing authentication data', async () => {
+    const publicLimiter = {
+      limit: vi.fn().mockResolvedValue({ success: false }),
+    } as RateLimit
+    const clientLimiter = {
+      limit: vi.fn().mockResolvedValue({ success: true }),
+    } as RateLimit
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const response = await requestExchange({
+      bindingOverrides: {
+        PUBLIC_RATE_LIMITER: publicLimiter,
+        CLIENT_RATE_LIMITER: clientLimiter,
+      },
+    })
+
+    expect(response.status).toBe(429)
+    expect(response.headers.get('retry-after')).toBe('60')
+    await expect(response.json()).resolves.toEqual({
+      error: 'rate_limited',
+    })
+    expect(publicLimiter.limit).toHaveBeenCalledWith({
+      key: 'exchange:ip:203.0.113.20',
+    })
+    expect(clientLimiter.limit).not.toHaveBeenCalled()
+    expect(await countRows('auth_codes')).toBe(1)
+    await expect(getAuthEvents()).resolves.toHaveLength(0)
+    expect(warn).toHaveBeenCalledWith({
+      event: 'rate_limited',
+      route: '/exchange',
+      scope: 'ip',
+      cfRay: null,
+      clientId: null,
+    })
+  })
+
+  it('rejects a rate-limited authenticated client without consuming the code', async () => {
+    const publicLimiter = {
+      limit: vi.fn().mockResolvedValue({ success: true }),
+    } as RateLimit
+    const clientLimiter = {
+      limit: vi.fn().mockResolvedValue({ success: false }),
+    } as RateLimit
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const response = await requestExchange({
+      bindingOverrides: {
+        PUBLIC_RATE_LIMITER: publicLimiter,
+        CLIENT_RATE_LIMITER: clientLimiter,
+      },
+    })
+
+    expect(response.status).toBe(429)
+    await expect(response.json()).resolves.toEqual({
+      error: 'rate_limited',
+    })
+    expect(clientLimiter.limit).toHaveBeenCalledWith({
+      key: `exchange:client:${CLIENT_ID}`,
+    })
+    expect(await countRows('auth_codes')).toBe(1)
+    await expect(getAuthEvents()).resolves.toHaveLength(0)
+    expect(warn).toHaveBeenCalledWith({
+      event: 'rate_limited',
+      route: '/exchange',
+      scope: 'client',
+      cfRay: null,
+      clientId: CLIENT_ID,
+    })
+  })
+
+  it('does not consume the client limit for invalid credentials', async () => {
+    const publicLimiter = {
+      limit: vi.fn().mockResolvedValue({ success: true }),
+    } as RateLimit
+    const clientLimiter = {
+      limit: vi.fn().mockResolvedValue({ success: true }),
+    } as RateLimit
+    const response = await requestExchange({
+      authorization: createBasicAuthorization(CLIENT_ID, 'wrong-secret'),
+      bindingOverrides: {
+        PUBLIC_RATE_LIMITER: publicLimiter,
+        CLIENT_RATE_LIMITER: clientLimiter,
+      },
+    })
+
+    expect(response.status).toBe(401)
+    expect(clientLimiter.limit).not.toHaveBeenCalled()
   })
 
   it.each([

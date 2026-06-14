@@ -6,6 +6,24 @@
   "triggers": {
     "crons": ["0 3 * * *"]
   },
+  "ratelimits": [
+    {
+      "name": "PUBLIC_RATE_LIMITER",
+      "namespace_id": "327618401",
+      "simple": {
+        "limit": 60,
+        "period": 60
+      }
+    },
+    {
+      "name": "CLIENT_RATE_LIMITER",
+      "namespace_id": "327618402",
+      "simple": {
+        "limit": 120,
+        "period": 60
+      }
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

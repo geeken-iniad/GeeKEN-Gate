@@ -3,6 +3,7 @@ import type { Context } from 'hono'
 import type { AppBindings } from '../lib/config'
 import { loadAuthServerConfig } from '../lib/config'
 import { generateRandomToken, hashAuthToken } from '../lib/crypto'
+import { enforceRateLimit, getClientIp } from '../lib/rate-limit'
 
 const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize'
 const OAUTH_STATE_LIFETIME_SECONDS = 10 * 60
@@ -32,6 +33,17 @@ async function isAllowedClientRedirect(
 }
 
 export async function handleLogin(c: AppContext): Promise<Response> {
+  const rateLimitResponse = await enforceRateLimit(
+    c,
+    c.env.PUBLIC_RATE_LIMITER,
+    `login:ip:${getClientIp(c)}`,
+    { route: '/login', scope: 'ip' },
+  )
+
+  if (rateLimitResponse !== null) {
+    return rateLimitResponse
+  }
+
   const clientId = c.req.query('client_id')
   const redirectUri = c.req.query('redirect_uri')
 

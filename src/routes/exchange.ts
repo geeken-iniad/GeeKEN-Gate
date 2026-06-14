@@ -3,6 +3,7 @@ import type { Context } from 'hono'
 import type { AppBindings } from '../lib/config'
 import { loadAuthServerConfig } from '../lib/config'
 import { hashAuthToken, verifyClientSecret } from '../lib/crypto'
+import { enforceRateLimit, getClientIp } from '../lib/rate-limit'
 
 const BASIC_AUTH_PATTERN = /^Basic ([A-Za-z0-9+/]+={0,2})$/i
 const DUMMY_CLIENT_SECRET_HASH = '0'.repeat(64)
@@ -117,6 +118,17 @@ function jsonError(
 }
 
 export async function handleExchange(c: AppContext): Promise<Response> {
+  const publicRateLimitResponse = await enforceRateLimit(
+    c,
+    c.env.PUBLIC_RATE_LIMITER,
+    `exchange:ip:${getClientIp(c)}`,
+    { route: '/exchange', scope: 'ip' },
+  )
+
+  if (publicRateLimitResponse !== null) {
+    return publicRateLimitResponse
+  }
+
   const config = loadAuthServerConfig(c.env)
   const occurredAt = Math.floor(Date.now() / 1000)
   const credentials = parseBasicCredentials(c.req.header('Authorization'))
@@ -160,6 +172,21 @@ export async function handleExchange(c: AppContext): Promise<Response> {
     )
 
     return jsonError(c, 'invalid_client', 401)
+  }
+
+  const clientRateLimitResponse = await enforceRateLimit(
+    c,
+    c.env.CLIENT_RATE_LIMITER,
+    `exchange:client:${credentials.clientId}`,
+    {
+      route: '/exchange',
+      scope: 'client',
+      clientId: credentials.clientId,
+    },
+  )
+
+  if (clientRateLimitResponse !== null) {
+    return clientRateLimitResponse
   }
 
   const contentType = c.req.header('Content-Type')

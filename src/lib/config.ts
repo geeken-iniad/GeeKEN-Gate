@@ -12,6 +12,8 @@ type RequiredStringBinding = (typeof REQUIRED_STRING_BINDINGS)[number]
 
 export interface AppBindings {
   DB: D1Database
+  PUBLIC_RATE_LIMITER: RateLimit
+  CLIENT_RATE_LIMITER: RateLimit
   GITHUB_CLIENT_ID?: string
   GITHUB_CLIENT_SECRET?: string
   GITHUB_ORG?: string

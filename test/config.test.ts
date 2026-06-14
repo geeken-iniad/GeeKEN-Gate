@@ -4,6 +4,7 @@ import {
   type AppBindings,
   loadAuthServerConfig,
 } from '../src/lib/config'
+import { allowingRateLimiter } from './rate-limit'
 
 const database = {
   prepare() {},
@@ -15,6 +16,8 @@ function createBindings(
 ): AppBindings {
   return {
     DB: database,
+    PUBLIC_RATE_LIMITER: allowingRateLimiter,
+    CLIENT_RATE_LIMITER: allowingRateLimiter,
     GITHUB_CLIENT_ID: 'github-client-id',
     GITHUB_CLIENT_SECRET: 'github-client-secret',
     GITHUB_ORG: 'example-org',

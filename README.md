@@ -221,6 +221,25 @@ pnpm deploy
 Cronは毎日UTC 03:00に実行され、期限切れsession、OAuth state、認証codeと、
 60日を超えた監査ログを削除します。
 
+## Rate Limiting
+
+Cloudflare Workers Rate Limiting bindingで、公開入口からD1への過剰なアクセスを
+抑止します。
+
+- `GET /login`: 接続元IPごとに60回/分
+- `POST /exchange`: 接続元IPごとに60回/分
+- `POST /exchange`: client secret検証済みclientごとに120回/分
+- `GET /health`: Cloudflare拠点ごとに合計60回/分
+
+超過時は`429`、`Retry-After: 60`、`Cache-Control: no-store`と
+`{"error":"rate_limited"}`を返します。超過はD1監査ログへ保存せず、`rate_limited`
+イベントとしてWorkers Logsへ出力します。Rate Limiting bindingが一時的に
+失敗した場合は`rate_limit_error`を記録し、認証処理を継続します。
+
+カウンターはCloudflare拠点単位で、結果整合的に更新されます。厳密な全世界共通
+上限ではなく、乱用抑止として扱ってください。閾値は`wrangler.jsonc`の
+`ratelimits`で変更できます。
+
 ## Verification
 
 ```bash

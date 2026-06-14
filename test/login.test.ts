@@ -1,15 +1,20 @@
 import { env } from 'cloudflare:workers'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AppBindings } from '../src/lib/config'
 import { hashAuthToken } from '../src/lib/crypto'
 import { app } from '../src/index'
+import { allowingRateLimiter } from './rate-limit'
 
 const NOW = 1_700_000_000
 const CLIENT_SECRET_HASH = 'a'.repeat(64)
 const CLIENT_ID = 'client-a'
 const REDIRECT_URI = 'https://client.example/callback'
 const SESSION_SECRET = 'test-session-secret'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 interface OAuthStateRow {
   state_hash: string
@@ -19,14 +24,19 @@ interface OAuthStateRow {
   expires_at: number
 }
 
-function createBindings(): AppBindings {
+function createBindings(
+  overrides: Partial<AppBindings> = {},
+): AppBindings {
   return {
     DB: env.DB,
+    PUBLIC_RATE_LIMITER: allowingRateLimiter,
+    CLIENT_RATE_LIMITER: allowingRateLimiter,
     GITHUB_CLIENT_ID: 'github-client-id',
     GITHUB_CLIENT_SECRET: 'github-client-secret',
     GITHUB_ORG: 'example-org',
     GITHUB_CALLBACK_URL: 'https://auth.example.com/callback',
     SESSION_SECRET,
+    ...overrides,
   }
 }
 
@@ -58,6 +68,8 @@ async function requestLogin(
     client_id: CLIENT_ID,
     redirect_uri: REDIRECT_URI,
   },
+  bindingOverrides: Partial<AppBindings> = {},
+  headers: HeadersInit = {},
 ) {
   const url = new URL('https://auth.example.com/login')
 
@@ -65,7 +77,13 @@ async function requestLogin(
     url.searchParams.set(name, value)
   }
 
-  return app.request(url, undefined, createBindings())
+  return app.request(
+    url,
+    {
+      headers,
+    },
+    createBindings(bindingOverrides),
+  )
 }
 
 async function getOAuthStates(): Promise<OAuthStateRow[]> {
@@ -130,6 +148,64 @@ describe('GET /login', () => {
 
     expect(firstState).not.toBe(secondState)
     await expect(getOAuthStates()).resolves.toHaveLength(2)
+  })
+
+  it('rejects a rate-limited IP before storing an OAuth state', async () => {
+    const limiter = {
+      limit: vi.fn().mockResolvedValue({ success: false }),
+    } as RateLimit
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const response = await requestLogin(
+      undefined,
+      { PUBLIC_RATE_LIMITER: limiter },
+      {
+        'CF-Connecting-IP': '203.0.113.30',
+        'CF-Ray': 'login-ray',
+      },
+    )
+
+    expect(response.status).toBe(429)
+    expect(response.headers.get('retry-after')).toBe('60')
+    await expect(response.json()).resolves.toEqual({
+      error: 'rate_limited',
+    })
+    expect(limiter.limit).toHaveBeenCalledWith({
+      key: 'login:ip:203.0.113.30',
+    })
+    await expect(getOAuthStates()).resolves.toHaveLength(0)
+    expect(warn).toHaveBeenCalledWith({
+      event: 'rate_limited',
+      route: '/login',
+      scope: 'ip',
+      cfRay: 'login-ray',
+      clientId: null,
+    })
+  })
+
+  it('continues login when the rate limiter throws', async () => {
+    const limiter = {
+      limit: vi.fn().mockRejectedValue(new Error('limiter unavailable')),
+    } as RateLimit
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const response = await requestLogin(
+      undefined,
+      { PUBLIC_RATE_LIMITER: limiter },
+      {
+        'CF-Connecting-IP': '203.0.113.30',
+        'CF-Ray': 'login-ray',
+      },
+    )
+
+    expect(response.status).toBe(302)
+    await expect(getOAuthStates()).resolves.toHaveLength(1)
+    expect(error).toHaveBeenCalledWith({
+      event: 'rate_limit_error',
+      route: '/login',
+      scope: 'ip',
+      cfRay: 'login-ray',
+      clientId: null,
+      errorName: 'Error',
+    })
   })
 
   it.each([

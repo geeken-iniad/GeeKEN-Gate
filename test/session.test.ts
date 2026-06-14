@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { AppBindings } from '../src/lib/config'
 import { hashAuthToken } from '../src/lib/crypto'
 import { app } from '../src/index'
+import { allowingRateLimiter } from './rate-limit'
 
 const NOW = 1_700_000_000
 const SESSION_SECRET = 'test-session-secret'
@@ -14,6 +15,8 @@ const GITHUB_LOGIN = 'octocat'
 function createBindings(): AppBindings {
   return {
     DB: env.DB,
+    PUBLIC_RATE_LIMITER: allowingRateLimiter,
+    CLIENT_RATE_LIMITER: allowingRateLimiter,
     GITHUB_CLIENT_ID: 'github-client-id',
     GITHUB_CLIENT_SECRET: 'github-client-secret',
     GITHUB_ORG: 'example-org',
