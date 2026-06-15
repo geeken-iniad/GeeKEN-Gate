@@ -2,7 +2,11 @@ const TOKEN_BYTE_LENGTH = 32
 const SHA256_BYTE_LENGTH = 32
 const textEncoder = new TextEncoder()
 
-export type AuthTokenPurpose = 'session' | 'oauth-state' | 'auth-code'
+export type AuthTokenPurpose =
+  | 'session'
+  | 'oauth-state'
+  | 'auth-code'
+  | 'access-token'
 
 type TimingSafeSubtleCrypto = SubtleCrypto & {
   timingSafeEqual(
@@ -11,7 +15,7 @@ type TimingSafeSubtleCrypto = SubtleCrypto & {
   ): boolean
 }
 
-function bytesToBase64Url(bytes: Uint8Array): string {
+export function bytesToBase64Url(bytes: Uint8Array): string {
   const binary = String.fromCharCode(...bytes)
 
   return btoa(binary)
@@ -40,7 +44,7 @@ function hexToBytes(value: string): Uint8Array | null {
   return bytes
 }
 
-async function sha256(value: string): Promise<Uint8Array> {
+export async function sha256(value: string): Promise<Uint8Array> {
   const digest = await crypto.subtle.digest('SHA-256', textEncoder.encode(value))
 
   return new Uint8Array(digest)

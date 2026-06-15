@@ -1,9 +1,13 @@
+import type { PrivateJwk } from './oidc'
+
 const REQUIRED_STRING_BINDINGS = [
   'GITHUB_CLIENT_ID',
   'GITHUB_CLIENT_SECRET',
   'GITHUB_ORG',
   'GITHUB_CALLBACK_URL',
   'SESSION_SECRET',
+  'OIDC_ISSUER',
+  'OIDC_PRIVATE_JWK',
 ] as const
 
 const HTTP_CALLBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
@@ -21,6 +25,8 @@ export interface AppBindings {
   GITHUB_ORG?: string
   GITHUB_CALLBACK_URL?: string
   SESSION_SECRET?: string
+  OIDC_ISSUER?: string
+  OIDC_PRIVATE_JWK?: string
 }
 
 export interface AuthServerConfig {
@@ -30,6 +36,8 @@ export interface AuthServerConfig {
   githubOrg: string
   githubCallbackUrl: URL
   sessionSecret: string
+  oidcIssuer: URL
+  oidcPrivateJwk: PrivateJwk & { kid: string }
 }
 
 function getRequiredString(
@@ -80,6 +88,41 @@ function getSessionSecret(bindings: AppBindings): string {
   return sessionSecret
 }
 
+function getHttpsOrLoopbackUrl(value: string, bindingName: string): URL {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error(`Invalid environment binding: ${bindingName}`)
+  }
+  const isLocalHttp = url.protocol === 'http:' && HTTP_CALLBACK_HOSTNAMES.has(url.hostname)
+  if (url.protocol !== 'https:' && !isLocalHttp) {
+    throw new Error(`Invalid environment binding: ${bindingName}`)
+  }
+  return url
+}
+
+function getOidcPrivateJwk(value: string): PrivateJwk & { kid: string } {
+  let jwk: PrivateJwk & { kid?: string }
+  try {
+    jwk = JSON.parse(value) as PrivateJwk & { kid?: string }
+  } catch {
+    throw new Error('Invalid environment binding: OIDC_PRIVATE_JWK')
+  }
+  if (
+    jwk.kty !== 'EC' ||
+    jwk.crv !== 'P-256' ||
+    typeof jwk.x !== 'string' ||
+    typeof jwk.y !== 'string' ||
+    typeof jwk.d !== 'string' ||
+    typeof jwk.kid !== 'string' ||
+    jwk.kid.trim().length === 0
+  ) {
+    throw new Error('Invalid environment binding: OIDC_PRIVATE_JWK')
+  }
+  return jwk as PrivateJwk & { kid: string }
+}
+
 function getDatabase(value: unknown): D1Database {
   if (
     typeof value !== 'object' ||
@@ -100,6 +143,7 @@ export function loadAuthServerConfig(
     bindings,
     'GITHUB_CALLBACK_URL',
   )
+  const issuerValue = getRequiredString(bindings, 'OIDC_ISSUER')
 
   return {
     db: getDatabase(bindings.DB),
@@ -108,5 +152,9 @@ export function loadAuthServerConfig(
     githubOrg: getRequiredString(bindings, 'GITHUB_ORG'),
     githubCallbackUrl: getCallbackUrl(githubCallbackUrlValue),
     sessionSecret: getSessionSecret(bindings),
+    oidcIssuer: getHttpsOrLoopbackUrl(issuerValue, 'OIDC_ISSUER'),
+    oidcPrivateJwk: getOidcPrivateJwk(
+      getRequiredString(bindings, 'OIDC_PRIVATE_JWK'),
+    ),
   }
 }

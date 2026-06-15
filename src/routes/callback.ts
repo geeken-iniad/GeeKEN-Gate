@@ -21,6 +21,20 @@ type AuthenticateGitHubUser = typeof authenticateGitHubUser
 interface OAuthStateRow {
   client_id: string
   redirect_uri: string
+  client_state: string | null
+  scope: string | null
+  nonce: string | null
+  provider: string | null
+  code_challenge: string | null
+  code_challenge_method: string | null
+}
+
+function includesScope(scope: string | null, required: string): boolean {
+  return scope?.split(/\s+/).includes(required) ?? false
+}
+
+function hasRequiredOidcState(oauthState: OAuthStateRow): boolean {
+  return oauthState.provider === 'github' && includesScope(oauthState.scope, 'openid') && !!oauthState.nonce
 }
 
 interface AuditEvent {
@@ -79,9 +93,10 @@ async function recordAuditEvent(
   await prepareAuditEvent(c, database, event, occurredAt).run()
 }
 
-function redirectWithError(redirectUri: string): Response {
+function redirectWithError(redirectUri: string, state?: string | null): Response {
   const location = new URL(redirectUri)
   location.searchParams.set('error', 'access_denied')
+  if (state) location.searchParams.set('state', state)
 
   return new Response(null, {
     status: 302,
@@ -123,7 +138,8 @@ export function createCallbackHandler(
         `DELETE FROM oauth_states
          WHERE state_hash = ?
            AND expires_at > ?
-         RETURNING client_id, redirect_uri`,
+         RETURNING client_id, redirect_uri, client_state, scope, nonce, provider,
+                   code_challenge, code_challenge_method`,
       )
       .bind(stateHash, occurredAt)
       .first<OAuthStateRow>()
@@ -133,6 +149,18 @@ export function createCallbackHandler(
         c,
         config.db,
         { success: false, reason: 'invalid_state' },
+        occurredAt,
+      )
+
+      c.header('Cache-Control', 'no-store')
+      return c.json({ error: 'invalid_request' }, 400)
+    }
+
+    if (!hasRequiredOidcState(oauthState)) {
+      await recordAuditEvent(
+        c,
+        config.db,
+        { success: false, reason: 'invalid_oidc_state' },
         occurredAt,
       )
 
@@ -165,7 +193,7 @@ export function createCallbackHandler(
         occurredAt,
       )
 
-      return redirectWithError(oauthState.redirect_uri)
+      return redirectWithError(oauthState.redirect_uri, oauthState.client_state)
     }
 
     const identity = await resolveGitHubIdentity(config.db, user, occurredAt)
@@ -187,7 +215,7 @@ export function createCallbackHandler(
         occurredAt,
       )
 
-      return redirectWithError(oauthState.redirect_uri)
+      return redirectWithError(oauthState.redirect_uri, oauthState.client_state)
     }
 
     const session = generateRandomToken()
@@ -213,15 +241,21 @@ export function createCallbackHandler(
       config.db
         .prepare(
           `INSERT INTO auth_codes
-             (code_hash, user_id, client_id, redirect_uri,
-              created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+              (code_hash, user_id, client_id, redirect_uri, scope, nonce, provider,
+               auth_time, code_challenge, code_challenge_method, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           authCodeHash,
           identity.userId,
           oauthState.client_id,
           oauthState.redirect_uri,
+          oauthState.scope,
+          oauthState.nonce,
+          oauthState.provider,
+          occurredAt,
+          oauthState.code_challenge,
+          oauthState.code_challenge_method,
           occurredAt,
           occurredAt + AUTH_CODE_LIFETIME_SECONDS,
         ),
@@ -250,6 +284,9 @@ export function createCallbackHandler(
 
     const redirectUrl = new URL(oauthState.redirect_uri)
     redirectUrl.searchParams.set('code', authCode)
+    if (oauthState.client_state) {
+      redirectUrl.searchParams.set('state', oauthState.client_state)
+    }
 
     return c.redirect(redirectUrl.href)
   }

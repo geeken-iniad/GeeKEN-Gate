@@ -27,6 +27,12 @@ export async function cleanupExpiredAuthData(
       .bind(currentTime),
     database
       .prepare(
+        `DELETE FROM access_tokens
+         WHERE expires_at <= ?`,
+      )
+      .bind(currentTime),
+    database
+      .prepare(
         `DELETE FROM auth_events
          WHERE occurred_at < ?`,
       )

@@ -139,16 +139,22 @@ function writeRedirect(response, location) {
   response.end()
 }
 
-export function buildLoginUrl(config) {
-  const loginUrl = new URL('login', config.gateBaseUrl)
+export function buildAuthorizeUrl(config) {
+  const loginUrl = new URL('authorize', config.gateBaseUrl)
+  loginUrl.searchParams.set('response_type', 'code')
   loginUrl.searchParams.set('client_id', config.clientId)
   loginUrl.searchParams.set('redirect_uri', config.redirectUri)
+  loginUrl.searchParams.set('scope', 'openid')
+  loginUrl.searchParams.set('state', crypto.randomUUID())
+  loginUrl.searchParams.set('nonce', crypto.randomUUID())
+  loginUrl.searchParams.set('provider', 'github')
 
   return loginUrl.href
 }
 
 export async function exchangeCode(config, code, fetchImplementation = fetch) {
   const body = new URLSearchParams({
+    grant_type: 'authorization_code',
     code,
     redirect_uri: config.redirectUri,
   })
@@ -157,7 +163,7 @@ export async function exchangeCode(config, code, fetchImplementation = fetch) {
     'utf8',
   ).toString('base64')
   const response = await fetchImplementation(
-    new URL('exchange', config.gateBaseUrl),
+    new URL('token', config.gateBaseUrl),
     {
       method: 'POST',
       headers: {
@@ -209,14 +215,14 @@ export function createRequestHandler(config, dependencies = {}) {
         200,
         page(
           'GeeKEN Gate Smoke Client',
-          '<p><a href="/login">Start GitHub OAuth login</a></p>',
+          '<p><a href="/login">Start OIDC login through GitHub</a></p>',
         ),
       )
       return
     }
 
     if (requestUrl.pathname === '/login') {
-      writeRedirect(response, buildLoginUrl(config))
+      writeRedirect(response, buildAuthorizeUrl(config))
       return
     }
 

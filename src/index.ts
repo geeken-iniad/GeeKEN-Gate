@@ -4,15 +4,23 @@ import { cleanupExpiredAuthData } from './lib/cleanup'
 import type { AppBindings } from './lib/config'
 import { enforceRateLimit } from './lib/rate-limit'
 import { handleCallback } from './routes/callback'
-import { handleExchange } from './routes/exchange'
-import { handleLogin } from './routes/login'
+import {
+  handleAuthorize,
+  handleDiscovery,
+  handleJwks,
+  handleToken,
+  handleUserinfo,
+} from './routes/oidc'
 import { handleLogout, handleSession } from './routes/session'
 
 export const app = new Hono<{ Bindings: AppBindings }>()
 
-app.get('/login', handleLogin)
+app.get('/.well-known/openid-configuration', handleDiscovery)
+app.get('/jwks.json', handleJwks)
+app.get('/authorize', handleAuthorize)
 app.get('/callback', handleCallback)
-app.post('/exchange', handleExchange)
+app.post('/token', handleToken)
+app.get('/userinfo', handleUserinfo)
 app.get('/session', handleSession)
 app.post('/logout', handleLogout)
 

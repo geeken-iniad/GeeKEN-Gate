@@ -12,6 +12,7 @@ const NOW = 1_700_000_000
 const CLIENT_ID = 'client-a'
 const REDIRECT_URI = 'https://client.example/callback?source=login'
 const SESSION_SECRET = 's'.repeat(32)
+const OIDC_PRIVATE_JWK = '{"key_ops":["sign"],"ext":true,"kty":"EC","x":"ODz8oKiIPaLIpdF2pMEKF3u0gc81OfilEdDaI7bP-K4","y":"0BIjbLOo0At-sq8ah16FdYhzuP8kQYbnt4PKfD9Trvw","crv":"P-256","d":"dM4taUd_F9VZHVziH6vmKIRlGgFtkbcQ11IFr_5LdHA","kid":"test-key","alg":"ES256"}'
 const OAUTH_STATE = 'oauth-state-value'
 const GITHUB_CODE = 'github-code'
 const EXISTING_USER_ID = 'user-123'
@@ -48,6 +49,8 @@ function createBindings(): AppBindings {
     GITHUB_ORG: 'example-org',
     GITHUB_CALLBACK_URL: 'https://auth.example.com/callback',
     SESSION_SECRET,
+    OIDC_ISSUER: 'https://auth.example.com',
+    OIDC_PRIVATE_JWK,
   }
 }
 
@@ -73,9 +76,9 @@ async function insertClientAndState(
     ).bind(CLIENT_ID, REDIRECT_URI, NOW),
     env.DB.prepare(
       `INSERT INTO oauth_states
-         (state_hash, client_id, redirect_uri, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
-    ).bind(stateHash, CLIENT_ID, REDIRECT_URI, NOW, expiresAt),
+         (state_hash, client_id, redirect_uri, client_state, scope, nonce, provider, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(stateHash, CLIENT_ID, REDIRECT_URI, 'client-state', 'openid', 'nonce-value', 'github', NOW, expiresAt),
   ])
 }
 
@@ -312,6 +315,22 @@ describe('GET /callback', () => {
     expect(authenticate).not.toHaveBeenCalled()
     expect(await countRows('sessions')).toBe(0)
     expect(await countRows('auth_codes')).toBe(0)
+  })
+
+  it('rejects migrated states with missing OIDC fields before calling GitHub', async () => {
+    await env.DB.prepare(`UPDATE oauth_states SET scope = NULL, nonce = NULL, provider = NULL`).run()
+    const { app, authenticate } = createTestApp()
+
+    const response = await requestCallback(app)
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({ error: 'invalid_request' })
+    expect(authenticate).not.toHaveBeenCalled()
+    expect(await countRows('sessions')).toBe(0)
+    expect(await countRows('auth_codes')).toBe(0)
+    await expect(getAuthEvents()).resolves.toEqual([
+      expect.objectContaining({ success: 0, reason: 'invalid_oidc_state' }),
+    ])
   })
 
   it.each([

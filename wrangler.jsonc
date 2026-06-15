@@ -6,6 +6,9 @@
   "triggers": {
     "crons": ["0 3 * * *"]
   },
+  "vars": {
+    "OIDC_ISSUER": "https://geeken-gate.example.com"
+  },
   "ratelimits": [
     {
       "name": "PUBLIC_RATE_LIMITER",

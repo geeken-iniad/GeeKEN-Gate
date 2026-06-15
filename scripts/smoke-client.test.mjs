@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
-  buildLoginUrl,
+  buildAuthorizeUrl,
   createRequestHandler,
   escapeHtml,
   exchangeCode,
@@ -86,17 +86,21 @@ describe('smoke client configuration', () => {
 })
 
 describe('smoke client requests', () => {
-  it('builds a login URL without the client secret', () => {
-    const loginUrl = buildLoginUrl(createConfig())
+  it('builds an authorize URL without the client secret', () => {
+    const loginUrl = new URL(buildAuthorizeUrl(createConfig()))
 
-    assert.equal(
-      loginUrl,
-      'https://gate.example/login?client_id=smoke-client&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback',
-    )
-    assert.doesNotMatch(loginUrl, /private-client-secret/)
+    assert.equal(loginUrl.origin + loginUrl.pathname, 'https://gate.example/authorize')
+    assert.equal(loginUrl.searchParams.get('response_type'), 'code')
+    assert.equal(loginUrl.searchParams.get('client_id'), 'smoke-client')
+    assert.equal(loginUrl.searchParams.get('redirect_uri'), 'http://localhost:3000/callback')
+    assert.equal(loginUrl.searchParams.get('scope'), 'openid')
+    assert.equal(loginUrl.searchParams.get('provider'), 'github')
+    assert.ok(loginUrl.searchParams.get('state'))
+    assert.ok(loginUrl.searchParams.get('nonce'))
+    assert.doesNotMatch(loginUrl.href, /private-client-secret/)
   })
 
-  it('uses Basic authentication and form data for code exchange', async () => {
+  it('uses Basic authentication and form data for token exchange', async () => {
     const calls = []
     const result = await exchangeCode(
       createConfig(),
@@ -105,8 +109,9 @@ describe('smoke client requests', () => {
         calls.push({ url, options })
         return new Response(
           JSON.stringify({
-            github_id: '123456',
-            github_login: 'octocat',
+            access_token: 'access-token',
+            token_type: 'Bearer',
+            id_token: 'header.payload.signature',
           }),
           {
             status: 200,
@@ -117,7 +122,7 @@ describe('smoke client requests', () => {
     )
 
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].url.href, 'https://gate.example/exchange')
+    assert.equal(calls[0].url.href, 'https://gate.example/token')
     assert.equal(calls[0].options.method, 'POST')
     assert.equal(
       calls[0].options.headers.Authorization,
@@ -131,14 +136,15 @@ describe('smoke client requests', () => {
     )
     assert.equal(
       calls[0].options.body.toString(),
-      'code=authorization-code&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback',
+      'grant_type=authorization_code&code=authorization-code&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback',
     )
     assert.deepEqual(result, {
       status: 200,
       ok: true,
       body: {
-        github_id: '123456',
-        github_login: 'octocat',
+        access_token: 'access-token',
+        token_type: 'Bearer',
+        id_token: 'header.payload.signature',
       },
     })
   })
@@ -149,12 +155,12 @@ describe('smoke client requests', () => {
     const login = await request(handler, '/login')
 
     assert.equal(home.status, 200)
-    assert.match(home.body, /Start GitHub OAuth login/)
+    assert.match(home.body, /Start OIDC login through GitHub/)
     assert.doesNotMatch(home.body, /private-client-secret/)
     assert.equal(login.status, 302)
     assert.equal(
-      login.headers.Location,
-      'https://gate.example/login?client_id=smoke-client&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback',
+      new URL(login.headers.Location).origin + new URL(login.headers.Location).pathname,
+      'https://gate.example/authorize',
     )
     assert.doesNotMatch(login.headers.Location, /private-client-secret/)
   })

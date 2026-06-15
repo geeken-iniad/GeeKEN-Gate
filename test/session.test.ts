@@ -8,6 +8,7 @@ import { allowingRateLimiter } from './rate-limit'
 
 const NOW = 1_700_000_000
 const SESSION_SECRET = 's'.repeat(32)
+const OIDC_PRIVATE_JWK = '{"key_ops":["sign"],"ext":true,"kty":"EC","x":"ODz8oKiIPaLIpdF2pMEKF3u0gc81OfilEdDaI7bP-K4","y":"0BIjbLOo0At-sq8ah16FdYhzuP8kQYbnt4PKfD9Trvw","crv":"P-256","d":"dM4taUd_F9VZHVziH6vmKIRlGgFtkbcQ11IFr_5LdHA","kid":"test-key","alg":"ES256"}'
 const SESSION = 'session-value'
 const USER_ID = 'user-123'
 const GITHUB_ID = '123456'
@@ -23,6 +24,8 @@ function createBindings(): AppBindings {
     GITHUB_ORG: 'example-org',
     GITHUB_CALLBACK_URL: 'https://auth.example.com/callback',
     SESSION_SECRET,
+    OIDC_ISSUER: 'https://auth.example.com',
+    OIDC_PRIVATE_JWK,
   }
 }
 

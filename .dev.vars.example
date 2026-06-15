@@ -3,3 +3,5 @@ GITHUB_CLIENT_SECRET=
 GITHUB_ORG=
 GITHUB_CALLBACK_URL=http://127.0.0.1:8787/callback
 SESSION_SECRET=
+OIDC_ISSUER=http://127.0.0.1:8787
+OIDC_PRIVATE_JWK={"kty":"EC","crv":"P-256","x":"...","y":"...","d":"...","kid":"geeken-gate-es256-1","alg":"ES256","key_ops":["sign"],"ext":true}

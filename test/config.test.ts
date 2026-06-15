@@ -11,6 +11,7 @@ const database = {
   batch() {},
 } as unknown as D1Database
 const SESSION_SECRET = 's'.repeat(32)
+const OIDC_PRIVATE_JWK = '{"key_ops":["sign"],"ext":true,"kty":"EC","x":"ODz8oKiIPaLIpdF2pMEKF3u0gc81OfilEdDaI7bP-K4","y":"0BIjbLOo0At-sq8ah16FdYhzuP8kQYbnt4PKfD9Trvw","crv":"P-256","d":"dM4taUd_F9VZHVziH6vmKIRlGgFtkbcQ11IFr_5LdHA","kid":"test-key","alg":"ES256"}'
 
 function createBindings(
   overrides: Partial<AppBindings> = {},
@@ -24,6 +25,8 @@ function createBindings(
     GITHUB_ORG: 'example-org',
     GITHUB_CALLBACK_URL: 'https://auth.example.com/callback',
     SESSION_SECRET,
+    OIDC_ISSUER: 'https://auth.example.com',
+    OIDC_PRIVATE_JWK,
     ...overrides,
   }
 }
@@ -39,6 +42,8 @@ describe('loadAuthServerConfig', () => {
       githubOrg: 'example-org',
       githubCallbackUrl: new URL('https://auth.example.com/callback'),
       sessionSecret: SESSION_SECRET,
+      oidcIssuer: new URL('https://auth.example.com'),
+      oidcPrivateJwk: JSON.parse(OIDC_PRIVATE_JWK),
     })
   })
 
@@ -48,6 +53,8 @@ describe('loadAuthServerConfig', () => {
     'GITHUB_ORG',
     'GITHUB_CALLBACK_URL',
     'SESSION_SECRET',
+    'OIDC_ISSUER',
+    'OIDC_PRIVATE_JWK',
   ] as const)('rejects a missing %s binding', (name) => {
     const bindings = createBindings()
     delete bindings[name]
@@ -63,6 +70,8 @@ describe('loadAuthServerConfig', () => {
     'GITHUB_ORG',
     'GITHUB_CALLBACK_URL',
     'SESSION_SECRET',
+    'OIDC_ISSUER',
+    'OIDC_PRIVATE_JWK',
   ] as const)('rejects an empty %s binding', (name) => {
     expect(() =>
       loadAuthServerConfig(createBindings({ [name]: '   ' })),
