@@ -11,8 +11,6 @@ const SESSION_SECRET = 's'.repeat(32)
 const OIDC_PRIVATE_JWK = '{"key_ops":["sign"],"ext":true,"kty":"EC","x":"ODz8oKiIPaLIpdF2pMEKF3u0gc81OfilEdDaI7bP-K4","y":"0BIjbLOo0At-sq8ah16FdYhzuP8kQYbnt4PKfD9Trvw","crv":"P-256","d":"dM4taUd_F9VZHVziH6vmKIRlGgFtkbcQ11IFr_5LdHA","kid":"test-key","alg":"ES256"}'
 const SESSION = 'session-value'
 const USER_ID = 'user-123'
-const GITHUB_ID = '123456'
-const GITHUB_LOGIN = 'octocat'
 
 function createBindings(): AppBindings {
   return {
@@ -83,7 +81,7 @@ async function insertSession(
       `INSERT INTO external_identities
          (provider, provider_user_id, user_id, provider_login, email, created_at, updated_at)
        VALUES ('github', ?, ?, ?, ?, ?, ?)`,
-    ).bind(GITHUB_ID, USER_ID, GITHUB_LOGIN, 'octo@example.com', NOW, NOW),
+    ).bind('123456', USER_ID, 'octocat', 'octo@example.com', NOW, NOW),
     env.DB.prepare(
       `INSERT INTO sessions
          (session_hash, user_id, created_at, expires_at)
@@ -157,8 +155,6 @@ describe('GET /session', () => {
     expect(response.headers.get('set-cookie')).toBeNull()
     await expect(response.json()).resolves.toEqual({
       user_id: USER_ID,
-      github_id: GITHUB_ID,
-      github_login: GITHUB_LOGIN,
     })
     expect(await countSessions()).toBe(1)
   })

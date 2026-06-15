@@ -1,144 +1,172 @@
 # GeeKEN Gate
 
-GitHub Organizationのactive memberだけを認証する、Cloudflare Workers、
-Hono、D1ベースの認証サーバーです。
+GeeKEN Gate is an internal OpenID Connect Provider (OP) for circle applications.
+GitHub and Google are external upstream identity providers (IdPs); applications
+authenticate through GeeKEN Gate, not directly through GitHub OAuth or Google
+OAuth.
+
+The stable application-facing identifier is the GeeKEN Gate OIDC `sub` claim
+(`users.user_id`). Applications must not use GitHub user ID, Google `sub`, or
+email address as their primary user identifier. GeeKEN Gate handles
+authentication and admission; each application handles its own authorization
+(roles, permissions, resource access) after it receives GeeKEN Gate `sub`.
+
+## Authentication and admission model
+
+- GeeKEN Gate issues OIDC tokens to registered clients.
+- GitHub login verifies GitHub Organization membership before issuing a GeeKEN
+  Gate subject.
+- Google login verifies the Google ID Token, requires an allowed `hd` hosted
+  domain claim, and then checks member database admission.
+- Being in the same Google Workspace domain is necessary but not sufficient for
+  Google login. The verified email must map to an active admitted member in the
+  member DB.
+- ID Tokens and `/userinfo` expose GeeKEN Gate `sub`; upstream provider IDs are
+  internal audit/linking data only.
 
 ## Requirements
 
 - Node.js 24
 - pnpm 11
-- CloudflareアカウントとWranglerログイン
-- 試験または運用対象のGitHub Organization
-- GitHub OAuth App
+- Cloudflare account and Wrangler login
+- D1 database
+- GitHub OAuth App for GitHub upstream login
+- Google OAuth client for Google upstream login
 
-## Local Setup
+## OIDC endpoints
 
-依存関係をインストールし、ローカルD1へmigrationを適用します。
+Applications should use standard OIDC Authorization Code Flow with PKCE:
 
-```bash
-pnpm install
-pnpm db:migrate:local
-```
+- `GET /.well-known/openid-configuration`
+- `GET /authorize`
+- `POST /token`
+- `GET /jwks.json`
+- `GET /userinfo`
 
-`.dev.vars.example`を基に、Git管理対象外の`.dev.vars`を作成します。
+Operational/session helpers are also available:
+
+- `GET /session`: inspect the current GeeKEN Gate browser session
+- `POST /logout`: clear the GeeKEN Gate browser session
+- `GET /health`: D1 health check
+
+`/session` is not the primary application integration path. Applications should
+use OIDC discovery, `/authorize`, `/token`, and token validation.
+
+## Environment variables
+
+Create `.dev.vars` from `.dev.vars.example` for local development. Important
+bindings are:
 
 ```dotenv
 GITHUB_CLIENT_ID=<GitHub OAuth App client ID>
 GITHUB_CLIENT_SECRET=<GitHub OAuth App client secret>
 GITHUB_ORG=<Organization login>
 GITHUB_CALLBACK_URL=http://127.0.0.1:8787/callback
-SESSION_SECRET=<32バイト以上のランダム値>
+
+GOOGLE_CLIENT_ID=<Google OAuth client ID>
+GOOGLE_CLIENT_SECRET=<Google OAuth client secret>
+GOOGLE_CALLBACK_URL=http://127.0.0.1:8787/callback
+GOOGLE_ALLOWED_HD=example.com
+
+SESSION_SECRET=<32 bytes or more random value>
+OIDC_ISSUER=http://127.0.0.1:8787
+OIDC_PRIVATE_JWK=<P-256 private JWK used to sign ID Tokens>
 ```
 
-`SESSION_SECRET`はUTF-8で32バイト以上を必須とし、短い値は設定読み込み時に
-拒否します。次のコマンドで32バイトのランダム値を生成できます。
+`SESSION_SECRET` must be at least 32 UTF-8 bytes. Generate a local value with:
 
 ```bash
 openssl rand -hex 32
 ```
 
-GitHub OAuth Appには次を設定します。
+`GOOGLE_ALLOWED_HD` is an exact comma-separated allowlist. It improves account
+selection UX when one domain is configured, but the returned Google ID Token
+`hd` claim and member DB admission are what decide access.
 
-- Homepage URL: `http://127.0.0.1:8787`
-- Authorization callback URL: `http://127.0.0.1:8787/callback`
-- Device Flow: 無効
-
-Workerを起動します。
+## Local setup
 
 ```bash
+pnpm install
+pnpm db:migrate:local
 pnpm dev
 ```
 
-## Client Registration
+Configure both upstream OAuth clients to redirect to the Worker callback URL
+(local default: `http://127.0.0.1:8787/callback`).
 
-client IDとredirect URIを指定してclientを登録します。
+## Client registration
+
+Register each application client with an exact redirect URI:
 
 ```bash
 pnpm client:register -- --local my-client http://localhost:3000/callback
 ```
 
-リモートD1へ登録する場合は`--remote`を指定します。
+For remote D1:
 
 ```bash
 pnpm client:register -- --remote my-client https://app.example.com/callback
 ```
 
-このコマンドは以下を行います。
+The command generates a random client secret, stores only its SHA-256 hash, and
+prints the plaintext secret exactly once. Store it in the client backend secret
+manager. Redirect URIs must match exactly; HTTPS is required except loopback HTTP
+for local development.
 
-- 32バイトの暗号学的乱数からclient secretを生成する
-- DBにはSHA-256 hashだけを保存する
-- clientとredirect URIを単一のD1 batchで登録する
-- D1登録成功後に限り、平文secretを一度だけ表示する
-
-表示されたsecretは直ちにクライアントバックエンドのsecret managerへ保存して
-ください。再表示や復元はできません。redirect URIは登録値と完全一致する必要が
-あります。HTTPSを必須とし、ローカル開発時だけloopback HTTPを許可します。
-
-clientを無効化するには次を実行します。
+Disable a client with:
 
 ```bash
 pnpm exec wrangler d1 execute DB --remote --command \
   "UPDATE clients SET disabled_at = unixepoch() WHERE client_id = 'my-client';"
 ```
 
-ローカルD1を操作する場合は`--remote`を`--local`へ変更します。
+Use `--local` instead of `--remote` for local D1.
 
-## Login Flow
+## Application integration summary
 
-クライアントバックエンドはブラウザを次のURLへ遷移させます。
+1. Read `/.well-known/openid-configuration`.
+2. Redirect the browser to the discovered `authorization_endpoint` with:
+   - `response_type=code`
+   - `client_id`
+   - exact registered `redirect_uri`
+   - `scope=openid`
+   - `state`
+   - `nonce`
+   - `provider=github` or `provider=google`
+   - PKCE `code_challenge` and `code_challenge_method=S256`
+3. Exchange the callback `code` at the discovered `token_endpoint` using
+   `client_secret_basic` and the PKCE `code_verifier`.
+4. Fetch `jwks_uri` and verify the ID Token signature and claims (`iss`, `aud`,
+   `exp`, `iat`, `auth_time`, `sub`, and `nonce` when sent).
+5. Store/link the user by GeeKEN Gate `(iss, sub)`, not by upstream IDs or email.
+6. Optionally call `/userinfo` with the access token and require its `sub` to
+   match the ID Token `sub`.
 
-```text
-http://127.0.0.1:8787/login?client_id=my-client&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback
-```
+## OIDC smoke client
 
-GitHub認証成功後、登録済みredirect URIへ2分間有効な`code`が付与されます。
-クライアントバックエンドはそのcodeを一度だけ交換します。
+The smoke client exercises the expected integration path: discovery,
+Authorization Code + PKCE, provider selection, token exchange, JWKS verification,
+GeeKEN Gate `sub` display, and optional `/userinfo` verification.
 
-```bash
-curl --request POST http://127.0.0.1:8787/exchange \
-  --user 'my-client:<client-secret>' \
-  --header 'Content-Type: application/x-www-form-urlencoded' \
-  --data-urlencode 'code=<authorization-code>' \
-  --data-urlencode 'redirect_uri=http://localhost:3000/callback'
-```
-
-成功時はGitHub user情報が返ります。
-
-```json
-{
-  "github_id": "123456",
-  "github_login": "octocat"
-}
-```
-
-client secretと`/exchange`はクライアントバックエンド専用です。ブラウザやSPAへ
-client secretを配布しないでください。
-
-## Production OAuth Smoke Test
-
-デプロイ済みWorker、実GitHub OAuth、リモートD1を通した認証フローは、開発者用
-の最小クライアントで手動確認できます。このクライアントは本番アプリでは
-ありません。
-
-検証用clientをリモートD1へ登録します。redirect URIは
-`http://localhost:3000/callback`を使用します。
+Register a smoke client with redirect URI `http://localhost:3000/callback`:
 
 ```bash
 pnpm client:register -- --remote smoke-client http://localhost:3000/callback
 ```
 
-表示されたclient secretを、Git管理対象外の`.env.smoke`などへ保存します。
-client secretをリポジトリへコミットしないでください。
+Create an untracked `.env.smoke`:
 
 ```dotenv
 GATE_BASE_URL=https://geeken-gate.example.workers.dev
 SMOKE_CLIENT_ID=smoke-client
-SMOKE_CLIENT_SECRET=<client:registerで一度だけ表示された値>
+SMOKE_CLIENT_SECRET=<client:register output>
 SMOKE_REDIRECT_URI=http://localhost:3000/callback
 SMOKE_PORT=3000
+SMOKE_PROVIDER=github # or google
+SMOKE_USERINFO=true
 ```
 
-環境変数を読み込んでsmoke clientを起動します。
+Run it:
 
 ```bash
 set -a
@@ -147,119 +175,69 @@ set +a
 pnpm smoke:client
 ```
 
-ブラウザで`http://localhost:3000`を開き、`Start GitHub OAuth login`を選択します。
-GitHub認証後、結果画面で以下を確認します。
+Open `http://localhost:3000`, choose GitHub or Google, and confirm that the
+result page says ID Token verification succeeded and clearly shows `GeeKEN Gate
+sub`. The smoke client redacts client secret, authorization code, access token,
+and ID Token values from browser output.
 
-1. 1回目の`/exchange`が成功し、GitHub IDとGitHub loginが表示される
-2. 同じcodeを使った2回目の`/exchange`が`invalid_grant`で失敗する
-3. client secretがブラウザ、URL、smoke clientのログへ表示されない
+## Migrations and deployment
 
-`SMOKE_PORT`を変更する場合は、`SMOKE_REDIRECT_URI`のポートとclient登録時の
-redirect URIも同じ値へ変更してください。登録済みredirect URIとは完全一致が
-必要です。
-
-## Session And Logout
-
-GitHub callback成功時、認証サーバーは7日間有効な`giken_session` Cookieを
-設定します。
-
-- `GET /session`: 現在のGitHub userを返す
-- `POST /logout`: 認証サーバーのsessionを削除してCookieを失効する
-
-Cookieは`HttpOnly; Secure; SameSite=Lax; Path=/`です。クライアントアプリ自身の
-sessionは、クライアント側で別途作成・削除してください。
-
-## User Freeze
-
-GitHub IDを凍結すると、callback、code交換、session照会が拒否されます。
-
-```bash
-pnpm exec wrangler d1 execute DB --remote --command \
-  "INSERT INTO frozen_users (github_id, frozen_at, reason)
-   VALUES ('123456', unixepoch(), 'manual freeze')
-   ON CONFLICT (github_id) DO UPDATE SET
-     frozen_at = excluded.frozen_at,
-     reason = excluded.reason;"
-```
-
-凍結解除:
-
-```bash
-pnpm exec wrangler d1 execute DB --remote --command \
-  "DELETE FROM frozen_users WHERE github_id = '123456';"
-```
-
-ローカルD1では`--remote`を`--local`へ変更します。
-
-## Cloudflare Deployment
-
-D1 databaseを作成し、表示されたdatabase IDを`wrangler.jsonc`の
-`database_id`へ設定します。
+Create or configure the D1 database, apply migrations, set secrets, and deploy:
 
 ```bash
 pnpm exec wrangler login
 pnpm exec wrangler d1 create geeken-gate
 pnpm db:migrate:remote
-```
 
-公開設定は通常のWrangler varsではなくsecretsとして登録します。
-
-```bash
 pnpm exec wrangler secret put GITHUB_CLIENT_ID
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET
 pnpm exec wrangler secret put GITHUB_ORG
 pnpm exec wrangler secret put GITHUB_CALLBACK_URL
+pnpm exec wrangler secret put GOOGLE_CLIENT_ID
+pnpm exec wrangler secret put GOOGLE_CLIENT_SECRET
+pnpm exec wrangler secret put GOOGLE_CALLBACK_URL
+pnpm exec wrangler secret put GOOGLE_ALLOWED_HD
 pnpm exec wrangler secret put SESSION_SECRET
-```
+pnpm exec wrangler secret put OIDC_ISSUER
+pnpm exec wrangler secret put OIDC_PRIVATE_JWK
 
-GitHub OAuth Appのcallback URLを公開Workerの`/callback`へ変更してから
-デプロイします。
-
-```bash
 pnpm deploy
 ```
 
-Cronは毎日UTC 03:00に実行され、期限切れsession、OAuth state、認証codeと、
-60日を超えた監査ログを削除します。
+Cron cleanup runs daily and removes expired sessions, OAuth state, authorization
+codes, access tokens, and old audit logs.
 
-## Rate Limiting
+## Rate limiting
 
-Cloudflare Workers Rate Limiting bindingで、公開入口からD1への過剰なアクセスを
-抑止します。
+Cloudflare Workers Rate Limiting protects public entry points:
 
-- `GET /login`: 接続元IPごとに60回/分
-- `POST /exchange`: 接続元IPごとに60回/分
-- `POST /exchange`: client secret検証済みclientごとに120回/分
-- `GET /health`: Cloudflare拠点ごとに合計60回/分
+- `GET /authorize`: source IP scope
+- `POST /token`: source IP scope and authenticated client scope
+- `GET /health`: global/edge scope
 
-超過時は`429`、`Retry-After: 60`、`Cache-Control: no-store`と
-`{"error":"rate_limited"}`を返します。超過はD1監査ログへ保存せず、`rate_limited`
-イベントとしてWorkers Logsへ出力します。Rate Limiting bindingが一時的に
-失敗した場合は`rate_limit_error`を記録し、認証処理を継続します。
-
-カウンターはCloudflare拠点単位で、結果整合的に更新されます。厳密な全世界共通
-上限ではなく、乱用抑止として扱ってください。閾値は`wrangler.jsonc`の
-`ratelimits`で変更できます。
+Limit responses use `429`, `Retry-After: 60`, `Cache-Control: no-store`, and
+`{"error":"rate_limited"}`. Rate limiter errors are logged and authentication
+continues.
 
 ## Verification
 
 ```bash
+pnpm typecheck
+pnpm test
+pnpm test:ops
 pnpm check
 ```
 
-実Organizationで確認する場合は、機密リポジトリを持たない試験Organizationと
-試験専用OAuth Appを推奨します。以下を確認してください。
+Manual production checks should confirm active members can log in, non-members
+and inactive members are rejected, ID Tokens verify against JWKS, `/userinfo`
+`sub` matches the ID Token `sub`, and no plaintext secrets/tokens are persisted
+or displayed.
 
-1. Organizationのactive memberがログインできる
-2. 非所属・pending・凍結userが拒否される
-3. codeが一度だけ交換できる
-4. `/session`がuserを返し、`/logout`後は401になる
-5. D1にGitHub token、平文session、state、code、client secretが存在しない
+## Security notes
 
-## Security Notes
-
-- GitHub access tokenはcallback処理中のローカル変数だけで扱います。
-- session、OAuth state、認証codeは用途別HMAC-SHA-256だけを保存します。
-- client secretはSHA-256 hashだけを保存し、timing-safeに比較します。
-- redirect URIはclientごとの登録値と完全一致で検証します。
-- CORSは公開していません。
+- Client secrets are backend-only and are stored hashed in D1.
+- `state`, `nonce`, and PKCE `code_verifier` are per-round-trip values.
+- ID Tokens are signed; applications must verify signature and claims.
+- Email, GitHub ID, and Google `sub` are not stable application primary keys.
+- GitHub/Google access tokens are handled only during upstream callback work.
+- CORS is not publicly enabled.

@@ -11,8 +11,6 @@ type AppContext = Context<{ Bindings: AppBindings }>
 
 interface SessionUserRow {
   user_id: string
-  github_id: string
-  github_login: string
   disabled_at: number | null
   member_status: string | null
   disallowed_member_email: number
@@ -63,17 +61,12 @@ export async function handleSession(c: AppContext): Promise<Response> {
                  AND member_emails.member_id = users.member_id
                 WHERE email_identities.user_id = users.user_id
                   AND member_emails.login_allowed = 0
-              ) AS disallowed_member_email,
-              external_identities.provider_user_id AS github_id,
-              external_identities.provider_login AS github_login
+              ) AS disallowed_member_email
        FROM sessions
        INNER JOIN users
          ON users.user_id = sessions.user_id
        LEFT JOIN members
          ON members.member_id = users.member_id
-       LEFT JOIN external_identities
-         ON external_identities.user_id = users.user_id
-        AND external_identities.provider = 'github'
        WHERE sessions.session_hash = ?
          AND sessions.expires_at > ?
        LIMIT 1`,
@@ -105,8 +98,6 @@ export async function handleSession(c: AppContext): Promise<Response> {
 
   return c.json({
     user_id: user.user_id,
-    github_id: user.github_id,
-    github_login: user.github_login,
   })
 }
 
