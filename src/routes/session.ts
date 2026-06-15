@@ -10,9 +10,12 @@ const SESSION_COOKIE_NAME = 'giken_session'
 type AppContext = Context<{ Bindings: AppBindings }>
 
 interface SessionUserRow {
+  user_id: string
   github_id: string
   github_login: string
-  frozen: number
+  disabled_at: number | null
+  member_status: string | null
+  disallowed_member_email: number
 }
 
 function expireSessionCookie(c: AppContext): void {
@@ -50,15 +53,27 @@ export async function handleSession(c: AppContext): Promise<Response> {
   const currentTime = Math.floor(Date.now() / 1000)
   const user = await config.db
     .prepare(
-      `SELECT users.github_id, users.github_login,
+      `SELECT users.user_id, users.disabled_at,
+              members.status AS member_status,
               EXISTS (
                 SELECT 1
-                FROM frozen_users
-                WHERE frozen_users.github_id = users.github_id
-              ) AS frozen
+                FROM external_identities AS email_identities
+                INNER JOIN member_emails
+                  ON member_emails.normalized_email = lower(trim(email_identities.email))
+                 AND member_emails.member_id = users.member_id
+                WHERE email_identities.user_id = users.user_id
+                  AND member_emails.login_allowed = 0
+              ) AS disallowed_member_email,
+              external_identities.provider_user_id AS github_id,
+              external_identities.provider_login AS github_login
        FROM sessions
        INNER JOIN users
-         ON users.github_id = sessions.github_id
+         ON users.user_id = sessions.user_id
+       LEFT JOIN members
+         ON members.member_id = users.member_id
+       LEFT JOIN external_identities
+         ON external_identities.user_id = users.user_id
+        AND external_identities.provider = 'github'
        WHERE sessions.session_hash = ?
          AND sessions.expires_at > ?
        LIMIT 1`,
@@ -71,7 +86,17 @@ export async function handleSession(c: AppContext): Promise<Response> {
     return sessionError(c, 'unauthorized', 401)
   }
 
-  if (user.frozen !== 0) {
+  if (user.disabled_at !== null) {
+    expireSessionCookie(c)
+    return sessionError(c, 'access_denied', 403)
+  }
+
+  if (user.member_status !== null && user.member_status !== 'active') {
+    expireSessionCookie(c)
+    return sessionError(c, 'access_denied', 403)
+  }
+
+  if (user.disallowed_member_email !== 0) {
     expireSessionCookie(c)
     return sessionError(c, 'access_denied', 403)
   }
@@ -79,6 +104,7 @@ export async function handleSession(c: AppContext): Promise<Response> {
   c.header('Cache-Control', 'no-store')
 
   return c.json({
+    user_id: user.user_id,
     github_id: user.github_id,
     github_login: user.github_login,
   })

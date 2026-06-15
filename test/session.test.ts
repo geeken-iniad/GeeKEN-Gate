@@ -9,6 +9,7 @@ import { allowingRateLimiter } from './rate-limit'
 const NOW = 1_700_000_000
 const SESSION_SECRET = 's'.repeat(32)
 const SESSION = 'session-value'
+const USER_ID = 'user-123'
 const GITHUB_ID = '123456'
 const GITHUB_LOGIN = 'octocat'
 
@@ -27,6 +28,10 @@ function createBindings(): AppBindings {
 
 async function insertSession(
   expiresAt = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+  options: {
+    memberStatus?: 'active' | 'suspended' | 'left'
+    memberEmailLoginAllowed?: 0 | 1
+  } = {},
 ): Promise<void> {
   const sessionHash = await hashAuthToken(
     SESSION,
@@ -34,18 +39,52 @@ async function insertSession(
     'session',
   )
 
-  await env.DB.batch([
+  const statements: D1PreparedStatement[] = []
+
+  if (options.memberStatus) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO members (member_id, display_name, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind('member-a', 'Octo Cat', options.memberStatus, NOW, NOW),
+    )
+  }
+
+  if (options.memberEmailLoginAllowed !== undefined) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO member_emails
+           (normalized_email, member_id, login_allowed, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind(
+        'octo@example.com',
+        'member-a',
+        options.memberEmailLoginAllowed,
+        NOW,
+        NOW,
+      ),
+    )
+  }
+
+  statements.push(
     env.DB.prepare(
       `INSERT INTO users
-         (github_id, github_login, created_at, updated_at)
+         (user_id, member_id, created_at, updated_at)
        VALUES (?, ?, ?, ?)`,
-    ).bind(GITHUB_ID, GITHUB_LOGIN, NOW, NOW),
+    ).bind(USER_ID, options.memberStatus ? 'member-a' : null, NOW, NOW),
+    env.DB.prepare(
+      `INSERT INTO external_identities
+         (provider, provider_user_id, user_id, provider_login, email, created_at, updated_at)
+       VALUES ('github', ?, ?, ?, ?, ?, ?)`,
+    ).bind(GITHUB_ID, USER_ID, GITHUB_LOGIN, 'octo@example.com', NOW, NOW),
     env.DB.prepare(
       `INSERT INTO sessions
-         (session_hash, github_id, created_at, expires_at)
+         (session_hash, user_id, created_at, expires_at)
        VALUES (?, ?, ?, ?)`,
-    ).bind(sessionHash, GITHUB_ID, NOW, expiresAt),
-  ])
+    ).bind(sessionHash, USER_ID, NOW, expiresAt),
+  )
+
+  await env.DB.batch(statements)
 }
 
 async function requestSession(session: string | null = SESSION) {
@@ -110,6 +149,7 @@ describe('GET /session', () => {
     expect(response.headers.get('cache-control')).toBe('no-store')
     expect(response.headers.get('set-cookie')).toBeNull()
     await expect(response.json()).resolves.toEqual({
+      user_id: USER_ID,
       github_id: GITHUB_ID,
       github_login: GITHUB_LOGIN,
     })
@@ -154,12 +194,11 @@ describe('GET /session', () => {
     expect(await countSessions()).toBe(1)
   })
 
-  it('rejects a frozen user and expires the session cookie', async () => {
+  it('rejects a disabled user and expires the session cookie', async () => {
     await env.DB.prepare(
-      `INSERT INTO frozen_users (github_id, frozen_at, reason)
-       VALUES (?, ?, ?)`,
+      `UPDATE users SET disabled_at = ? WHERE user_id = ?`,
     )
-      .bind(GITHUB_ID, NOW, 'manual freeze')
+      .bind(NOW, USER_ID)
       .run()
 
     const response = await requestSession()
@@ -170,6 +209,35 @@ describe('GET /session', () => {
     })
     expectExpiredSessionCookie(response)
     expect(await countSessions()).toBe(1)
+  })
+
+  it('rejects a suspended member and expires the session cookie', async () => {
+    await env.DB.prepare('DELETE FROM sessions').run()
+    await env.DB.prepare('DELETE FROM external_identities').run()
+    await env.DB.prepare('DELETE FROM users').run()
+    await insertSession(undefined, { memberStatus: 'suspended' })
+
+    const response = await requestSession()
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toEqual({ error: 'access_denied' })
+    expectExpiredSessionCookie(response)
+  })
+
+  it('rejects a disallowed member email when present', async () => {
+    await env.DB.prepare('DELETE FROM sessions').run()
+    await env.DB.prepare('DELETE FROM external_identities').run()
+    await env.DB.prepare('DELETE FROM users').run()
+    await insertSession(undefined, {
+      memberStatus: 'active',
+      memberEmailLoginAllowed: 0,
+    })
+
+    const response = await requestSession()
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toEqual({ error: 'access_denied' })
+    expectExpiredSessionCookie(response)
   })
 })
 

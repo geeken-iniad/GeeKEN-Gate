@@ -14,6 +14,7 @@ const REDIRECT_URI = 'https://client.example/callback?source=login'
 const SESSION_SECRET = 's'.repeat(32)
 const OAUTH_STATE = 'oauth-state-value'
 const GITHUB_CODE = 'github-code'
+const EXISTING_USER_ID = 'user-123'
 const GITHUB_USER = {
   githubId: '123456',
   githubLogin: 'octocat',
@@ -167,9 +168,15 @@ describe('GET /callback', () => {
     expect(setCookie).toContain('SameSite=Lax')
 
     const user = await env.DB.prepare(
-      `SELECT github_id, github_login, created_at, updated_at
-       FROM users`,
+      `SELECT users.user_id, users.created_at, users.updated_at,
+              external_identities.provider_user_id AS github_id,
+              external_identities.provider_login AS github_login
+       FROM users
+       INNER JOIN external_identities
+         ON external_identities.user_id = users.user_id
+        AND external_identities.provider = 'github'`,
     ).first<{
+      user_id: string
       github_id: string
       github_login: string
       created_at: number
@@ -179,6 +186,9 @@ describe('GET /callback', () => {
       github_id: GITHUB_USER.githubId,
       github_login: GITHUB_USER.githubLogin,
     })
+    expect(user?.user_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
     expect(user?.created_at).toBeGreaterThanOrEqual(beforeRequest)
     expect(user?.created_at).toBeLessThanOrEqual(afterRequest)
     expect(user?.updated_at).toBe(user?.created_at)
@@ -226,10 +236,17 @@ describe('GET /callback', () => {
   it('updates an existing user login', async () => {
     await env.DB.prepare(
       `INSERT INTO users
-         (github_id, github_login, created_at, updated_at)
-       VALUES (?, ?, ?, ?)`,
+         (user_id, created_at, updated_at)
+       VALUES (?, ?, ?)`,
     )
-      .bind(GITHUB_USER.githubId, 'old-login', NOW, NOW)
+      .bind(EXISTING_USER_ID, NOW, NOW)
+      .run()
+    await env.DB.prepare(
+      `INSERT INTO external_identities
+         (provider, provider_user_id, user_id, provider_login, created_at, updated_at)
+       VALUES ('github', ?, ?, ?, ?, ?)`,
+    )
+      .bind(GITHUB_USER.githubId, EXISTING_USER_ID, 'old-login', NOW, NOW)
       .run()
     const { app } = createTestApp()
 
@@ -237,11 +254,15 @@ describe('GET /callback', () => {
 
     expect(response.status).toBe(302)
     const user = await env.DB.prepare(
-      `SELECT github_login, created_at, updated_at
+      `SELECT users.created_at, users.updated_at,
+              external_identities.provider_login AS github_login
        FROM users
-       WHERE github_id = ?`,
+       INNER JOIN external_identities
+         ON external_identities.user_id = users.user_id
+        AND external_identities.provider = 'github'
+       WHERE users.user_id = ?`,
     )
-      .bind(GITHUB_USER.githubId)
+      .bind(EXISTING_USER_ID)
       .first<{
         github_login: string
         created_at: number
@@ -342,12 +363,19 @@ describe('GET /callback', () => {
     ])
   })
 
-  it('rejects a frozen user without creating credentials', async () => {
+  it('rejects a disabled user without creating credentials', async () => {
     await env.DB.prepare(
-      `INSERT INTO frozen_users (github_id, frozen_at, reason)
-       VALUES (?, ?, ?)`,
+      `INSERT INTO users (user_id, disabled_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?)`,
     )
-      .bind(GITHUB_USER.githubId, NOW, 'manual freeze')
+      .bind(EXISTING_USER_ID, NOW, NOW, NOW)
+      .run()
+    await env.DB.prepare(
+      `INSERT INTO external_identities
+         (provider, provider_user_id, user_id, provider_login, created_at, updated_at)
+       VALUES ('github', ?, ?, ?, ?, ?)`,
+    )
+      .bind(GITHUB_USER.githubId, EXISTING_USER_ID, GITHUB_USER.githubLogin, NOW, NOW)
       .run()
     const { app } = createTestApp()
 
@@ -357,7 +385,7 @@ describe('GET /callback', () => {
     expect(
       new URL(response.headers.get('location') ?? '').searchParams.get('error'),
     ).toBe('access_denied')
-    expect(await countRows('users')).toBe(0)
+    expect(await countRows('users')).toBe(1)
     expect(await countRows('sessions')).toBe(0)
     expect(await countRows('auth_codes')).toBe(0)
     await expect(getAuthEvents()).resolves.toEqual([
@@ -365,7 +393,47 @@ describe('GET /callback', () => {
         github_id: GITHUB_USER.githubId,
         github_login: GITHUB_USER.githubLogin,
         success: 0,
-        reason: 'frozen_user',
+        reason: 'disabled_user',
+      }),
+    ])
+  })
+
+  it('rejects a suspended member without creating credentials', async () => {
+    await env.DB.prepare(
+      `INSERT INTO members (member_id, display_name, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind('member-a', 'Octo Cat', 'suspended', NOW, NOW)
+      .run()
+    await env.DB.prepare(
+      `INSERT INTO users (user_id, member_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?)`,
+    )
+      .bind(EXISTING_USER_ID, 'member-a', NOW, NOW)
+      .run()
+    await env.DB.prepare(
+      `INSERT INTO external_identities
+         (provider, provider_user_id, user_id, provider_login, created_at, updated_at)
+       VALUES ('github', ?, ?, ?, ?, ?)`,
+    )
+      .bind(GITHUB_USER.githubId, EXISTING_USER_ID, GITHUB_USER.githubLogin, NOW, NOW)
+      .run()
+    const { app } = createTestApp()
+
+    const response = await requestCallback(app)
+
+    expect(response.status).toBe(302)
+    expect(
+      new URL(response.headers.get('location') ?? '').searchParams.get('error'),
+    ).toBe('access_denied')
+    expect(await countRows('sessions')).toBe(0)
+    expect(await countRows('auth_codes')).toBe(0)
+    await expect(getAuthEvents()).resolves.toEqual([
+      expect.objectContaining({
+        github_id: GITHUB_USER.githubId,
+        github_login: GITHUB_USER.githubLogin,
+        success: 0,
+        reason: 'member_not_active',
       }),
     ])
   })

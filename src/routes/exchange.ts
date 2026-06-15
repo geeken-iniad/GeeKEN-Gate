@@ -20,13 +20,16 @@ interface ClientRow {
 }
 
 interface AuthCodeRow {
-  github_id: string
+  user_id: string
 }
 
 interface UserRow {
+  user_id: string
   github_id: string
   github_login: string
-  frozen: number
+  disabled_at: number | null
+  member_status: string | null
+  disallowed_member_email: number
 }
 
 interface AuditEvent {
@@ -84,12 +87,14 @@ async function recordAuditEvent(
   await database
     .prepare(
       `INSERT INTO auth_events
-         (event_type, github_id, github_login, client_id, redirect_uri,
-          success, reason, ip_address, user_agent, occurred_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (event_type, user_id, provider, github_id, github_login, client_id,
+          redirect_uri, success, reason, ip_address, user_agent, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       'exchange',
+      event.user?.user_id ?? null,
+      event.user ? 'github' : null,
       event.user?.github_id ?? null,
       event.user?.github_login ?? null,
       event.clientId ?? null,
@@ -275,7 +280,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
            WHERE clients.client_id = auth_codes.client_id
              AND clients.disabled_at IS NULL
          )
-       RETURNING github_id`,
+       RETURNING user_id`,
     )
     .bind(codeHash, credentials.clientId, redirectUri, occurredAt)
     .first<AuthCodeRow>()
@@ -298,17 +303,29 @@ export async function handleExchange(c: AppContext): Promise<Response> {
 
   const user = await config.db
     .prepare(
-      `SELECT users.github_id, users.github_login,
+      `SELECT users.user_id, users.disabled_at,
+              members.status AS member_status,
               EXISTS (
                 SELECT 1
-                FROM frozen_users
-                WHERE frozen_users.github_id = users.github_id
-              ) AS frozen
+                FROM external_identities AS email_identities
+                INNER JOIN member_emails
+                  ON member_emails.normalized_email = lower(trim(email_identities.email))
+                 AND member_emails.member_id = users.member_id
+                WHERE email_identities.user_id = users.user_id
+                  AND member_emails.login_allowed = 0
+              ) AS disallowed_member_email,
+              external_identities.provider_user_id AS github_id,
+              external_identities.provider_login AS github_login
        FROM users
-       WHERE users.github_id = ?
+       LEFT JOIN members
+         ON members.member_id = users.member_id
+       LEFT JOIN external_identities
+         ON external_identities.user_id = users.user_id
+        AND external_identities.provider = 'github'
+       WHERE users.user_id = ?
        LIMIT 1`,
     )
-    .bind(authCode.github_id)
+    .bind(authCode.user_id)
     .first<UserRow>()
 
   if (user === null) {
@@ -327,13 +344,47 @@ export async function handleExchange(c: AppContext): Promise<Response> {
     return jsonError(c, 'invalid_grant', 400)
   }
 
-  if (user.frozen !== 0) {
+  if (user.disabled_at !== null) {
     await recordAuditEvent(
       c,
       config.db,
       {
         success: false,
-        reason: 'frozen_user',
+        reason: 'disabled_user',
+        clientId: credentials.clientId,
+        redirectUri,
+        user,
+      },
+      occurredAt,
+    )
+
+    return jsonError(c, 'access_denied', 403)
+  }
+
+  if (user.member_status !== null && user.member_status !== 'active') {
+    await recordAuditEvent(
+      c,
+      config.db,
+      {
+        success: false,
+        reason: 'member_not_active',
+        clientId: credentials.clientId,
+        redirectUri,
+        user,
+      },
+      occurredAt,
+    )
+
+    return jsonError(c, 'access_denied', 403)
+  }
+
+  if (user.disallowed_member_email !== 0) {
+    await recordAuditEvent(
+      c,
+      config.db,
+      {
+        success: false,
+        reason: 'member_email_not_allowed',
         clientId: credentials.clientId,
         redirectUri,
         user,
@@ -358,6 +409,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
   c.header('Cache-Control', 'no-store')
 
   return c.json({
+    user_id: user.user_id,
     github_id: user.github_id,
     github_login: user.github_login,
   })

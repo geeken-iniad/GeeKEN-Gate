@@ -9,6 +9,7 @@ import {
   GitHubAuthError,
   type GitHubAuthenticatedUser,
 } from '../lib/github'
+import { getUserAdmission, resolveGitHubIdentity } from '../lib/identity'
 
 const SESSION_COOKIE_NAME = 'giken_session'
 const SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60
@@ -28,6 +29,7 @@ interface AuditEvent {
   clientId?: string
   redirectUri?: string
   user?: GitHubAuthenticatedUser
+  userId?: string
 }
 
 function getRequestMetadata(c: AppContext) {
@@ -48,12 +50,14 @@ function prepareAuditEvent(
   return database
     .prepare(
       `INSERT INTO auth_events
-         (event_type, github_id, github_login, client_id, redirect_uri,
-          success, reason, ip_address, user_agent, occurred_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (event_type, user_id, provider, github_id, github_login, client_id,
+          redirect_uri, success, reason, ip_address, user_agent, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       'callback',
+      event.userId ?? null,
+      event.user ? 'github' : null,
       event.user?.githubId ?? null,
       event.user?.githubLogin ?? null,
       event.clientId ?? null,
@@ -164,26 +168,21 @@ export function createCallbackHandler(
       return redirectWithError(oauthState.redirect_uri)
     }
 
-    const frozenUser = await config.db
-      .prepare(
-        `SELECT 1
-         FROM frozen_users
-         WHERE github_id = ?
-         LIMIT 1`,
-      )
-      .bind(user.githubId)
-      .first()
+    const identity = await resolveGitHubIdentity(config.db, user, occurredAt)
 
-    if (frozenUser !== null) {
+    const admission = await getUserAdmission(config.db, identity.userId)
+
+    if (!admission.allowed) {
       await recordAuditEvent(
         c,
         config.db,
         {
           success: false,
-          reason: 'frozen_user',
+          reason: admission.reason,
           clientId: oauthState.client_id,
           redirectUri: oauthState.redirect_uri,
           user,
+          userId: identity.userId,
         },
         occurredAt,
       )
@@ -201,36 +200,26 @@ export function createCallbackHandler(
     await config.db.batch([
       config.db
         .prepare(
-          `INSERT INTO users
-             (github_id, github_login, created_at, updated_at)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT (github_id) DO UPDATE SET
-             github_login = excluded.github_login,
-             updated_at = excluded.updated_at`,
-        )
-        .bind(user.githubId, user.githubLogin, occurredAt, occurredAt),
-      config.db
-        .prepare(
           `INSERT INTO sessions
-             (session_hash, github_id, created_at, expires_at)
+             (session_hash, user_id, created_at, expires_at)
            VALUES (?, ?, ?, ?)`,
         )
         .bind(
           sessionHash,
-          user.githubId,
+          identity.userId,
           occurredAt,
           occurredAt + SESSION_LIFETIME_SECONDS,
         ),
       config.db
         .prepare(
           `INSERT INTO auth_codes
-             (code_hash, github_id, client_id, redirect_uri,
+             (code_hash, user_id, client_id, redirect_uri,
               created_at, expires_at)
            VALUES (?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           authCodeHash,
-          user.githubId,
+          identity.userId,
           oauthState.client_id,
           oauthState.redirect_uri,
           occurredAt,
@@ -244,6 +233,7 @@ export function createCallbackHandler(
           clientId: oauthState.client_id,
           redirectUri: oauthState.redirect_uri,
           user,
+          userId: identity.userId,
         },
         occurredAt,
       ),

@@ -19,9 +19,9 @@ async function insertCleanupFixtures(): Promise<void> {
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO users
-         (github_id, github_login, created_at, updated_at)
-       VALUES (?, ?, ?, ?)`,
-    ).bind('100', 'octocat', CURRENT_TIME - 100, CURRENT_TIME - 100),
+         (user_id, created_at, updated_at)
+       VALUES (?, ?, ?)`,
+    ).bind('user-100', CURRENT_TIME - 100, CURRENT_TIME - 100),
     env.DB.prepare(
       `INSERT INTO clients
          (client_id, client_secret_hash, created_at)
@@ -37,19 +37,19 @@ async function insertCleanupFixtures(): Promise<void> {
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO sessions
-         (session_hash, github_id, created_at, expires_at)
+         (session_hash, user_id, created_at, expires_at)
        VALUES (?, ?, ?, ?)`,
-    ).bind(HASH_A, '100', CURRENT_TIME - 100, CURRENT_TIME - 1),
+    ).bind(HASH_A, 'user-100', CURRENT_TIME - 100, CURRENT_TIME - 1),
     env.DB.prepare(
       `INSERT INTO sessions
-         (session_hash, github_id, created_at, expires_at)
+         (session_hash, user_id, created_at, expires_at)
        VALUES (?, ?, ?, ?)`,
-    ).bind(HASH_B, '100', CURRENT_TIME - 100, CURRENT_TIME),
+    ).bind(HASH_B, 'user-100', CURRENT_TIME - 100, CURRENT_TIME),
     env.DB.prepare(
       `INSERT INTO sessions
-         (session_hash, github_id, created_at, expires_at)
+         (session_hash, user_id, created_at, expires_at)
        VALUES (?, ?, ?, ?)`,
-    ).bind(HASH_C, '100', CURRENT_TIME - 100, CURRENT_TIME + 1),
+    ).bind(HASH_C, 'user-100', CURRENT_TIME - 100, CURRENT_TIME + 1),
     env.DB.prepare(
       `INSERT INTO oauth_states
          (state_hash, client_id, redirect_uri, created_at, expires_at)
@@ -85,11 +85,11 @@ async function insertCleanupFixtures(): Promise<void> {
     ),
     env.DB.prepare(
       `INSERT INTO auth_codes
-         (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
+         (code_hash, user_id, client_id, redirect_uri, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).bind(
       HASH_A,
-      '100',
+      'user-100',
       'client-a',
       REDIRECT_URI,
       CURRENT_TIME - 100,
@@ -97,11 +97,11 @@ async function insertCleanupFixtures(): Promise<void> {
     ),
     env.DB.prepare(
       `INSERT INTO auth_codes
-         (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
+         (code_hash, user_id, client_id, redirect_uri, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).bind(
       HASH_B,
-      '100',
+      'user-100',
       'client-a',
       REDIRECT_URI,
       CURRENT_TIME - 100,
@@ -109,11 +109,11 @@ async function insertCleanupFixtures(): Promise<void> {
     ),
     env.DB.prepare(
       `INSERT INTO auth_codes
-         (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
+         (code_hash, user_id, client_id, redirect_uri, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).bind(
       HASH_C,
-      '100',
+      'user-100',
       'client-a',
       REDIRECT_URI,
       CURRENT_TIME - 100,

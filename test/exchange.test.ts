@@ -15,6 +15,7 @@ const CLIENT_SECRET = 'client-secret'
 const REDIRECT_URI = 'https://client.example/callback'
 const AUTH_CODE = 'authorization-code'
 const SESSION_SECRET = 's'.repeat(32)
+const USER_ID = 'user-123'
 const GITHUB_ID = '123456'
 const GITHUB_LOGIN = 'octocat'
 
@@ -64,6 +65,8 @@ async function insertAuthenticationCode(
     redirectUri?: string
     code?: string
     expiresAt?: number
+    memberStatus?: 'active' | 'suspended' | 'left'
+    memberEmailLoginAllowed?: 0 | 1
   } = {},
 ): Promise<void> {
   const clientId = options.clientId ?? CLIENT_ID
@@ -77,12 +80,44 @@ async function insertAuthenticationCode(
     hashAuthToken(code, SESSION_SECRET, 'auth-code'),
   ])
 
-  await env.DB.batch([
+  const statements: D1PreparedStatement[] = []
+
+  if (options.memberStatus) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO members (member_id, display_name, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind('member-a', 'Octo Cat', options.memberStatus, NOW, NOW),
+    )
+  }
+
+  if (options.memberEmailLoginAllowed !== undefined) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO member_emails
+           (normalized_email, member_id, login_allowed, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind(
+        'octo@example.com',
+        'member-a',
+        options.memberEmailLoginAllowed,
+        NOW,
+        NOW,
+      ),
+    )
+  }
+
+  statements.push(
     env.DB.prepare(
       `INSERT INTO users
-         (github_id, github_login, created_at, updated_at)
+         (user_id, member_id, created_at, updated_at)
        VALUES (?, ?, ?, ?)`,
-    ).bind(GITHUB_ID, GITHUB_LOGIN, NOW, NOW),
+    ).bind(USER_ID, options.memberStatus ? 'member-a' : null, NOW, NOW),
+    env.DB.prepare(
+      `INSERT INTO external_identities
+         (provider, provider_user_id, user_id, provider_login, email, created_at, updated_at)
+       VALUES ('github', ?, ?, ?, ?, ?, ?)`,
+    ).bind(GITHUB_ID, USER_ID, GITHUB_LOGIN, 'octo@example.com', NOW, NOW),
     env.DB.prepare(
       `INSERT INTO clients
          (client_id, client_secret_hash, created_at)
@@ -95,10 +130,12 @@ async function insertAuthenticationCode(
     ).bind(clientId, redirectUri, NOW),
     env.DB.prepare(
       `INSERT INTO auth_codes
-         (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
+         (code_hash, user_id, client_id, redirect_uri, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(codeHash, GITHUB_ID, clientId, redirectUri, NOW, expiresAt),
-  ])
+    ).bind(codeHash, USER_ID, clientId, redirectUri, NOW, expiresAt),
+  )
+
+  await env.DB.batch(statements)
 }
 
 async function requestExchange(
@@ -178,6 +215,7 @@ describe('POST /exchange', () => {
     expect(response.status).toBe(200)
     expect(response.headers.get('cache-control')).toBe('no-store')
     await expect(response.json()).resolves.toEqual({
+      user_id: USER_ID,
       github_id: GITHUB_ID,
       github_login: GITHUB_LOGIN,
     })
@@ -482,12 +520,11 @@ describe('POST /exchange', () => {
     expect(await countRows('auth_codes')).toBe(1)
   })
 
-  it('rejects a frozen user and consumes the one-time code', async () => {
+  it('rejects a disabled user and consumes the one-time code', async () => {
     await env.DB.prepare(
-      `INSERT INTO frozen_users (github_id, frozen_at, reason)
-       VALUES (?, ?, ?)`,
+      `UPDATE users SET disabled_at = ? WHERE user_id = ?`,
     )
-      .bind(GITHUB_ID, NOW, 'manual freeze')
+      .bind(NOW, USER_ID)
       .run()
 
     const response = await requestExchange()
@@ -502,7 +539,66 @@ describe('POST /exchange', () => {
         github_id: GITHUB_ID,
         github_login: GITHUB_LOGIN,
         success: 0,
-        reason: 'frozen_user',
+        reason: 'disabled_user',
+      }),
+    ])
+  })
+
+  it('rejects a suspended member and consumes the one-time code', async () => {
+    await env.DB.prepare(
+      `INSERT INTO members (member_id, display_name, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind('member-a', 'Octo Cat', 'suspended', NOW, NOW)
+      .run()
+    await env.DB.prepare('UPDATE users SET member_id = ? WHERE user_id = ?')
+      .bind('member-a', USER_ID)
+      .run()
+
+    const response = await requestExchange()
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toEqual({ error: 'access_denied' })
+    expect(await countRows('auth_codes')).toBe(0)
+    await expect(getAuthEvents()).resolves.toEqual([
+      expect.objectContaining({
+        github_id: GITHUB_ID,
+        github_login: GITHUB_LOGIN,
+        success: 0,
+        reason: 'member_not_active',
+      }),
+    ])
+  })
+
+  it('rejects a disallowed member email and consumes the one-time code', async () => {
+    await env.DB.prepare(
+      `INSERT INTO members (member_id, display_name, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind('member-a', 'Octo Cat', 'active', NOW, NOW)
+      .run()
+    await env.DB.prepare(
+      `INSERT INTO member_emails
+         (normalized_email, member_id, login_allowed, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind('octo@example.com', 'member-a', 0, NOW, NOW)
+      .run()
+    await env.DB.prepare('UPDATE users SET member_id = ? WHERE user_id = ?')
+      .bind('member-a', USER_ID)
+      .run()
+
+    const response = await requestExchange()
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toEqual({ error: 'access_denied' })
+    expect(await countRows('auth_codes')).toBe(0)
+    await expect(getAuthEvents()).resolves.toEqual([
+      expect.objectContaining({
+        github_id: GITHUB_ID,
+        github_login: GITHUB_LOGIN,
+        success: 0,
+        reason: 'member_email_not_allowed',
       }),
     ])
   })
