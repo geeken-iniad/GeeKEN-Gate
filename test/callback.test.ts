@@ -3,13 +3,16 @@ import { Hono } from 'hono'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AppBindings } from '../src/lib/config'
-import { hashAuthToken } from '../src/lib/crypto'
+import { hashAuthToken, hashClientSecret } from '../src/lib/crypto'
 import { GitHubAuthError } from '../src/lib/github'
+import { GoogleAuthError } from '../src/lib/google'
 import { createCallbackHandler } from '../src/routes/callback'
+import { handleToken, handleUserinfo } from '../src/routes/oidc'
 import { allowingRateLimiter } from './rate-limit'
 
 const NOW = 1_700_000_000
 const CLIENT_ID = 'client-a'
+const CLIENT_SECRET = 'client-secret'
 const REDIRECT_URI = 'https://client.example/callback?source=login'
 const SESSION_SECRET = 's'.repeat(32)
 const OIDC_PRIVATE_JWK = '{"key_ops":["sign"],"ext":true,"kty":"EC","x":"ODz8oKiIPaLIpdF2pMEKF3u0gc81OfilEdDaI7bP-K4","y":"0BIjbLOo0At-sq8ah16FdYhzuP8kQYbnt4PKfD9Trvw","crv":"P-256","d":"dM4taUd_F9VZHVziH6vmKIRlGgFtkbcQ11IFr_5LdHA","kid":"test-key","alg":"ES256"}'
@@ -19,6 +22,11 @@ const EXISTING_USER_ID = 'user-123'
 const GITHUB_USER = {
   githubId: '123456',
   githubLogin: 'octocat',
+}
+const GOOGLE_USER = {
+  googleSub: 'google-sub-123',
+  email: 'member@example.com',
+  hostedDomain: 'example.com',
 }
 
 interface StoredCredential {
@@ -48,6 +56,10 @@ function createBindings(): AppBindings {
     GITHUB_CLIENT_SECRET: 'github-client-secret',
     GITHUB_ORG: 'example-org',
     GITHUB_CALLBACK_URL: 'https://auth.example.com/callback',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_CALLBACK_URL: 'https://auth.example.com/callback',
+    GOOGLE_ALLOWED_HD: 'example.com',
     SESSION_SECRET,
     OIDC_ISSUER: 'https://auth.example.com',
     OIDC_PRIVATE_JWK,
@@ -87,6 +99,48 @@ function createTestApp(authenticate = vi.fn().mockResolvedValue(GITHUB_USER)) {
   app.get('/callback', createCallbackHandler(authenticate))
 
   return { app, authenticate }
+}
+
+function createGoogleTestApp(authenticateGoogle = vi.fn().mockResolvedValue(GOOGLE_USER)) {
+  const app = new Hono<{ Bindings: AppBindings }>()
+  app.get('/callback', createCallbackHandler(vi.fn(), authenticateGoogle))
+
+  return { app, authenticateGoogle }
+}
+
+function createGoogleOidcTestApp(authenticateGoogle = vi.fn().mockResolvedValue(GOOGLE_USER)) {
+  const app = new Hono<{ Bindings: AppBindings }>()
+  app.get('/callback', createCallbackHandler(vi.fn(), authenticateGoogle))
+  app.post('/token', handleToken)
+  app.get('/userinfo', handleUserinfo)
+
+  return { app, authenticateGoogle }
+}
+
+function basic(): string {
+  return `Basic ${btoa(`${CLIENT_ID}:${CLIENT_SECRET}`)}`
+}
+
+async function useGoogleState(): Promise<void> {
+  await env.DB.prepare(`UPDATE oauth_states SET provider = 'google'`).run()
+}
+
+async function insertMember(
+  email = GOOGLE_USER.email,
+  memberId = 'member-a',
+  status: 'active' | 'suspended' | 'left' = 'active',
+  loginAllowed: 0 | 1 = 1,
+) {
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO members (member_id, display_name, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(memberId, 'Member A', status, NOW, NOW),
+    env.DB.prepare(
+      `INSERT INTO member_emails (normalized_email, member_id, login_allowed, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(email, memberId, loginAllowed, NOW, NOW),
+  ])
 }
 
 async function requestCallback(
@@ -274,6 +328,258 @@ describe('GET /callback', () => {
     expect(user?.github_login).toBe(GITHUB_USER.githubLogin)
     expect(user?.created_at).toBe(NOW)
     expect(user?.updated_at).toBeGreaterThan(NOW)
+  })
+
+  it('admits an active member through Google and stores internal user identity', async () => {
+    await useGoogleState()
+    await insertMember()
+    const { app, authenticateGoogle } = createGoogleTestApp()
+
+    const response = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(response.status).toBe(302)
+    expect(authenticateGoogle).toHaveBeenCalledWith('google-code', {
+      clientId: 'google-client-id',
+      clientSecret: 'google-client-secret',
+      callbackUrl: new URL('https://auth.example.com/callback'),
+      allowedHostedDomains: ['example.com'],
+      nonce: 'nonce-value',
+    })
+    const identity = await env.DB.prepare(
+      `SELECT users.user_id, users.member_id, external_identities.provider_user_id,
+              external_identities.email, external_identities.email_verified,
+              external_identities.hosted_domain
+       FROM users
+       INNER JOIN external_identities ON external_identities.user_id = users.user_id
+       WHERE external_identities.provider = 'google'`,
+    ).first<{ user_id: string; member_id: string; provider_user_id: string; email: string; email_verified: number; hosted_domain: string }>()
+    expect(identity).toMatchObject({
+      member_id: 'member-a',
+      provider_user_id: GOOGLE_USER.googleSub,
+      email: GOOGLE_USER.email,
+      email_verified: 1,
+      hosted_domain: GOOGLE_USER.hostedDomain,
+    })
+    expect(identity?.user_id).not.toBe(GOOGLE_USER.googleSub)
+    expect(await countRows('sessions')).toBe(1)
+    expect(await countRows('auth_codes')).toBe(1)
+  })
+
+  it('rejects a same-domain Google user who is not a member', async () => {
+    await useGoogleState()
+    const { app } = createGoogleTestApp()
+
+    const response = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(response.status).toBe(302)
+    expect(new URL(response.headers.get('location') ?? '').searchParams.get('error')).toBe('access_denied')
+    expect(await countRows('users')).toBe(0)
+    expect(await countRows('external_identities')).toBe(0)
+    expect(await countRows('sessions')).toBe(0)
+    await expect(getAuthEvents()).resolves.toEqual([
+      expect.objectContaining({ success: 0, reason: 'member_email_not_found' }),
+    ])
+  })
+
+  it.each([
+    ['suspended member', 'suspended', 1, 'member_suspended'],
+    ['left member', 'left', 1, 'member_left'],
+    ['login disabled member email', 'active', 0, 'member_login_disabled'],
+  ] as const)('rejects a Google login for %s', async (_caseName, status, loginAllowed, reason) => {
+    await useGoogleState()
+    await insertMember(GOOGLE_USER.email, 'member-a', status, loginAllowed)
+    const { app } = createGoogleTestApp()
+
+    const response = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(response.status).toBe(302)
+    expect(await countRows('sessions')).toBe(0)
+    expect(await countRows('auth_codes')).toBe(0)
+    expect(await countRows('external_identities')).toBe(0)
+    await expect(getAuthEvents()).resolves.toEqual([
+      expect.objectContaining({ success: 0, reason }),
+    ])
+  })
+
+  it('rejects a Google login when the existing member user is disabled', async () => {
+    await useGoogleState()
+    await insertMember()
+    await env.DB.prepare(
+      `INSERT INTO users (user_id, member_id, disabled_at, created_at, updated_at)
+       VALUES (?, 'member-a', ?, ?, ?)`,
+    ).bind(EXISTING_USER_ID, NOW, NOW, NOW).run()
+    const { app } = createGoogleTestApp()
+
+    const response = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(response.status).toBe(302)
+    expect(await countRows('external_identities')).toBe(0)
+    await expect(getAuthEvents()).resolves.toEqual([
+      expect.objectContaining({ success: 0, reason: 'user_disabled' }),
+    ])
+  })
+
+  it.each([
+    ['unverified email', 'google_email_not_verified'],
+    ['missing hd', 'google_hd_missing'],
+    ['non-allowed hd', 'google_hd_not_allowed'],
+  ] as const)('redirects Google ID token rejection for %s', async (_caseName, reason) => {
+    await useGoogleState()
+    const { app } = createGoogleTestApp(vi.fn().mockRejectedValue(new GoogleAuthError(reason)))
+
+    const response = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(response.status).toBe(302)
+    expect(await countRows('users')).toBe(0)
+    expect(await countRows('external_identities')).toBe(0)
+    await expect(getAuthEvents()).resolves.toEqual([
+      expect.objectContaining({ success: 0, reason }),
+    ])
+  })
+
+  it('reuses an existing Google identity', async () => {
+    await useGoogleState()
+    await insertMember()
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO users (user_id, member_id, created_at, updated_at) VALUES (?, 'member-a', ?, ?)`).bind(EXISTING_USER_ID, NOW, NOW),
+      env.DB.prepare(`INSERT INTO external_identities (provider, provider_user_id, user_id, email, email_verified, hosted_domain, created_at, updated_at) VALUES ('google', ?, ?, ?, 1, ?, ?, ?)`).bind(GOOGLE_USER.googleSub, EXISTING_USER_ID, 'old@example.com', 'example.com', NOW, NOW),
+    ])
+    const { app } = createGoogleTestApp()
+
+    const response = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(response.status).toBe(302)
+    expect(await countRows('users')).toBe(1)
+    const identity = await env.DB.prepare(`SELECT user_id, email FROM external_identities WHERE provider = 'google'`).first<{ user_id: string; email: string }>()
+    expect(identity).toEqual({ user_id: EXISTING_USER_ID, email: GOOGLE_USER.email })
+  })
+
+  it('links Google identity to an existing member user', async () => {
+    await useGoogleState()
+    await insertMember()
+    await env.DB.prepare(`INSERT INTO users (user_id, member_id, created_at, updated_at) VALUES (?, 'member-a', ?, ?)`).bind(EXISTING_USER_ID, NOW, NOW).run()
+    const { app } = createGoogleTestApp()
+
+    const response = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(response.status).toBe(302)
+    expect(await countRows('users')).toBe(1)
+    const identity = await env.DB.prepare(`SELECT user_id FROM external_identities WHERE provider = 'google'`).first<{ user_id: string }>()
+    expect(identity?.user_id).toBe(EXISTING_USER_ID)
+  })
+
+  it('admits Google login with current allowed email despite another disallowed linked email', async () => {
+    await useGoogleState()
+    await insertMember()
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO member_emails (normalized_email, member_id, login_allowed, created_at, updated_at)
+         VALUES (?, 'member-a', 0, ?, ?)`,
+      ).bind('stale@example.com', NOW, NOW),
+      env.DB.prepare(`INSERT INTO users (user_id, member_id, created_at, updated_at) VALUES (?, 'member-a', ?, ?)`).bind(EXISTING_USER_ID, NOW, NOW),
+      env.DB.prepare(
+        `INSERT INTO external_identities
+           (provider, provider_user_id, user_id, provider_login, email, email_verified, created_at, updated_at)
+         VALUES ('github', 'stale-gh', ?, 'stale', 'stale@example.com', 1, ?, ?)`,
+      ).bind(EXISTING_USER_ID, NOW, NOW),
+    ])
+    const { app } = createGoogleTestApp()
+
+    const response = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(response.status).toBe(302)
+    expect(new URL(response.headers.get('location') ?? '').searchParams.get('error')).toBeNull()
+    expect(await countRows('sessions')).toBe(1)
+    const googleIdentity = await env.DB.prepare(
+      `SELECT user_id, email FROM external_identities WHERE provider = 'google'`,
+    ).first<{ user_id: string; email: string }>()
+    expect(googleIdentity).toEqual({ user_id: EXISTING_USER_ID, email: GOOGLE_USER.email })
+  })
+
+  it('exchanges and uses Google OIDC artifacts despite another disallowed linked email', async () => {
+    await useGoogleState()
+    await env.DB.prepare(
+      `UPDATE clients SET client_secret_hash = ? WHERE client_id = ?`,
+    ).bind(await hashClientSecret(CLIENT_SECRET), CLIENT_ID).run()
+    await insertMember()
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO member_emails (normalized_email, member_id, login_allowed, created_at, updated_at)
+         VALUES (?, 'member-a', 0, ?, ?)`,
+      ).bind('stale@example.com', NOW, NOW),
+      env.DB.prepare(`INSERT INTO users (user_id, member_id, created_at, updated_at) VALUES (?, 'member-a', ?, ?)`).bind(EXISTING_USER_ID, NOW, NOW),
+      env.DB.prepare(
+        `INSERT INTO external_identities
+           (provider, provider_user_id, user_id, provider_login, email, email_verified, created_at, updated_at)
+         VALUES ('github', 'stale-gh', ?, 'stale', 'stale@example.com', 1, ?, ?)`,
+      ).bind(EXISTING_USER_ID, NOW, NOW),
+    ])
+    const { app } = createGoogleOidcTestApp()
+
+    const callbackResponse = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(callbackResponse.status).toBe(302)
+    const authCode = new URL(callbackResponse.headers.get('location') ?? '').searchParams.get('code')
+    expect(authCode).toMatch(/^[A-Za-z0-9_-]{43}$/)
+
+    const tokenResponse = await app.request('https://auth.example.com/token', {
+      method: 'POST',
+      headers: { Authorization: basic(), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', code: authCode ?? '', redirect_uri: REDIRECT_URI }),
+    }, createBindings())
+
+    expect(tokenResponse.status).toBe(200)
+    const tokenBody = await tokenResponse.json() as { access_token: string; id_token: string }
+    const claims = JSON.parse(atob(tokenBody.id_token.split('.')[1].replaceAll('-', '+').replaceAll('_', '/')))
+    expect(claims.sub).toBe(EXISTING_USER_ID)
+    expect(claims.sub).not.toBe(GOOGLE_USER.googleSub)
+
+    const userinfoResponse = await app.request('https://auth.example.com/userinfo', {
+      headers: { Authorization: `Bearer ${tokenBody.access_token}` },
+    }, createBindings())
+    expect(userinfoResponse.status).toBe(200)
+    await expect(userinfoResponse.json()).resolves.toEqual({ sub: EXISTING_USER_ID })
+  })
+
+  it('rechecks the Google identity email before exchanging Google OIDC artifacts', async () => {
+    await useGoogleState()
+    await env.DB.prepare(
+      `UPDATE clients SET client_secret_hash = ? WHERE client_id = ?`,
+    ).bind(await hashClientSecret(CLIENT_SECRET), CLIENT_ID).run()
+    await insertMember()
+    const { app } = createGoogleOidcTestApp()
+
+    const callbackResponse = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+    expect(callbackResponse.status).toBe(302)
+    const authCode = new URL(callbackResponse.headers.get('location') ?? '').searchParams.get('code')
+    await env.DB.prepare(
+      `UPDATE member_emails SET login_allowed = 0 WHERE normalized_email = ?`,
+    ).bind(GOOGLE_USER.email).run()
+
+    const tokenResponse = await app.request('https://auth.example.com/token', {
+      method: 'POST',
+      headers: { Authorization: basic(), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', code: authCode ?? '', redirect_uri: REDIRECT_URI }),
+    }, createBindings())
+
+    expect(tokenResponse.status).toBe(403)
+    await expect(tokenResponse.json()).resolves.toEqual({ error: 'access_denied' })
+  })
+
+  it('does not persist a Google identity when the current email is rejected for an existing member user', async () => {
+    await useGoogleState()
+    await insertMember(GOOGLE_USER.email, 'member-a', 'active', 0)
+    await env.DB.prepare(`INSERT INTO users (user_id, member_id, created_at, updated_at) VALUES (?, 'member-a', ?, ?)`).bind(EXISTING_USER_ID, NOW, NOW).run()
+    const { app } = createGoogleTestApp()
+
+    const response = await requestCallback(app, { code: 'google-code', state: OAUTH_STATE })
+
+    expect(response.status).toBe(302)
+    expect(await countRows('sessions')).toBe(0)
+    expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM external_identities WHERE provider = 'google'`).first<{ count: number }>()).toEqual({ count: 0 })
+    await expect(getAuthEvents()).resolves.toEqual([
+      expect.objectContaining({ success: 0, reason: 'member_login_disabled' }),
+    ])
   })
 
   it('rejects a reused state before calling GitHub', async () => {

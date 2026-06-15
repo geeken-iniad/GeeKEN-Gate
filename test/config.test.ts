@@ -24,6 +24,10 @@ function createBindings(
     GITHUB_CLIENT_SECRET: 'github-client-secret',
     GITHUB_ORG: 'example-org',
     GITHUB_CALLBACK_URL: 'https://auth.example.com/callback',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_CALLBACK_URL: 'https://auth.example.com/callback',
+    GOOGLE_ALLOWED_HD: ' Example.COM , sub.example.org ',
     SESSION_SECRET,
     OIDC_ISSUER: 'https://auth.example.com',
     OIDC_PRIVATE_JWK,
@@ -41,6 +45,10 @@ describe('loadAuthServerConfig', () => {
       githubClientSecret: 'github-client-secret',
       githubOrg: 'example-org',
       githubCallbackUrl: new URL('https://auth.example.com/callback'),
+      googleClientId: 'google-client-id',
+      googleClientSecret: 'google-client-secret',
+      googleCallbackUrl: new URL('https://auth.example.com/callback'),
+      googleAllowedHostedDomains: ['example.com', 'sub.example.org'],
       sessionSecret: SESSION_SECRET,
       oidcIssuer: new URL('https://auth.example.com'),
       oidcPrivateJwk: JSON.parse(OIDC_PRIVATE_JWK),
@@ -52,6 +60,10 @@ describe('loadAuthServerConfig', () => {
     'GITHUB_CLIENT_SECRET',
     'GITHUB_ORG',
     'GITHUB_CALLBACK_URL',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_CALLBACK_URL',
+    'GOOGLE_ALLOWED_HD',
     'SESSION_SECRET',
     'OIDC_ISSUER',
     'OIDC_PRIVATE_JWK',
@@ -69,6 +81,10 @@ describe('loadAuthServerConfig', () => {
     'GITHUB_CLIENT_SECRET',
     'GITHUB_ORG',
     'GITHUB_CALLBACK_URL',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_CALLBACK_URL',
+    'GOOGLE_ALLOWED_HD',
     'SESSION_SECRET',
     'OIDC_ISSUER',
     'OIDC_PRIVATE_JWK',
@@ -104,6 +120,32 @@ describe('loadAuthServerConfig', () => {
 
     expect(config.githubCallbackUrl.href).toBe(callbackUrl)
   })
+
+  it.each([
+    'not-a-url',
+    'ftp://auth.example.com/callback',
+    'http://auth.example.com/callback',
+    'http://localhost.evil.example/callback',
+  ])('rejects an invalid Google callback URL: %s', (callbackUrl) => {
+    expect(() =>
+      loadAuthServerConfig(
+        createBindings({ GOOGLE_CALLBACK_URL: callbackUrl }),
+      ),
+    ).toThrow('Invalid environment binding: GOOGLE_CALLBACK_URL')
+  })
+
+  it.each(['', '   ', 'example.com,', ',example.com', 'example.com, ,example.org'])(
+    'rejects invalid GOOGLE_ALLOWED_HD: %s',
+    (allowedHd) => {
+      expect(() =>
+        loadAuthServerConfig(createBindings({ GOOGLE_ALLOWED_HD: allowedHd })),
+      ).toThrow(
+        allowedHd.trim().length === 0
+          ? 'Missing or empty environment binding: GOOGLE_ALLOWED_HD'
+          : 'Invalid environment binding: GOOGLE_ALLOWED_HD',
+      )
+    },
+  )
 
   it.each([
     ['31 ASCII bytes', 's'.repeat(31)],

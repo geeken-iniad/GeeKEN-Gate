@@ -58,22 +58,24 @@ describe('initial migration', () => {
     )
   })
 
-  it('records both migrations only once when reapplied', async () => {
+  it('records migrations only once when reapplied', async () => {
     await applyD1Migrations(env.DB, env.TEST_MIGRATIONS)
 
     const row = await env.DB.prepare(
       `SELECT name, COUNT(*) AS count
        FROM d1_migrations
-       WHERE name IN (?, ?)
+       WHERE name IN (?, ?, ?, ?)
        GROUP BY name`,
     )
-      .bind('0001_initial.sql', '0002_identity_membership_model.sql')
+      .bind('0001_initial.sql', '0002_identity_membership_model.sql', '0003_oidc_provider.sql', '0004_google_oidc_artifact_identity.sql')
       .all<{ name: string; count: number }>()
 
     expect(row.results).toEqual(
       expect.arrayContaining([
         { name: '0001_initial.sql', count: 1 },
         { name: '0002_identity_membership_model.sql', count: 1 },
+        { name: '0003_oidc_provider.sql', count: 1 },
+        { name: '0004_google_oidc_artifact_identity.sql', count: 1 },
       ]),
     )
   })

@@ -5,6 +5,10 @@ const REQUIRED_STRING_BINDINGS = [
   'GITHUB_CLIENT_SECRET',
   'GITHUB_ORG',
   'GITHUB_CALLBACK_URL',
+  'GOOGLE_CLIENT_ID',
+  'GOOGLE_CLIENT_SECRET',
+  'GOOGLE_CALLBACK_URL',
+  'GOOGLE_ALLOWED_HD',
   'SESSION_SECRET',
   'OIDC_ISSUER',
   'OIDC_PRIVATE_JWK',
@@ -24,6 +28,10 @@ export interface AppBindings {
   GITHUB_CLIENT_SECRET?: string
   GITHUB_ORG?: string
   GITHUB_CALLBACK_URL?: string
+  GOOGLE_CLIENT_ID?: string
+  GOOGLE_CLIENT_SECRET?: string
+  GOOGLE_CALLBACK_URL?: string
+  GOOGLE_ALLOWED_HD?: string
   SESSION_SECRET?: string
   OIDC_ISSUER?: string
   OIDC_PRIVATE_JWK?: string
@@ -35,6 +43,10 @@ export interface AuthServerConfig {
   githubClientSecret: string
   githubOrg: string
   githubCallbackUrl: URL
+  googleClientId: string
+  googleClientSecret: string
+  googleCallbackUrl: URL
+  googleAllowedHostedDomains: string[]
   sessionSecret: string
   oidcIssuer: URL
   oidcPrivateJwk: PrivateJwk & { kid: string }
@@ -102,6 +114,14 @@ function getHttpsOrLoopbackUrl(value: string, bindingName: string): URL {
   return url
 }
 
+function getAllowedHostedDomains(value: string): string[] {
+  const domains = value.split(',').map((domain) => domain.trim().toLowerCase())
+  if (domains.length === 0 || domains.some((domain) => domain.length === 0)) {
+    throw new Error('Invalid environment binding: GOOGLE_ALLOWED_HD')
+  }
+  return domains
+}
+
 function getOidcPrivateJwk(value: string): PrivateJwk & { kid: string } {
   let jwk: PrivateJwk & { kid?: string }
   try {
@@ -143,6 +163,10 @@ export function loadAuthServerConfig(
     bindings,
     'GITHUB_CALLBACK_URL',
   )
+  const googleCallbackUrlValue = getRequiredString(
+    bindings,
+    'GOOGLE_CALLBACK_URL',
+  )
   const issuerValue = getRequiredString(bindings, 'OIDC_ISSUER')
 
   return {
@@ -151,6 +175,10 @@ export function loadAuthServerConfig(
     githubClientSecret: getRequiredString(bindings, 'GITHUB_CLIENT_SECRET'),
     githubOrg: getRequiredString(bindings, 'GITHUB_ORG'),
     githubCallbackUrl: getCallbackUrl(githubCallbackUrlValue),
+    googleClientId: getRequiredString(bindings, 'GOOGLE_CLIENT_ID'),
+    googleClientSecret: getRequiredString(bindings, 'GOOGLE_CLIENT_SECRET'),
+    googleCallbackUrl: getHttpsOrLoopbackUrl(googleCallbackUrlValue, 'GOOGLE_CALLBACK_URL'),
+    googleAllowedHostedDomains: getAllowedHostedDomains(getRequiredString(bindings, 'GOOGLE_ALLOWED_HD')),
     sessionSecret: getSessionSecret(bindings),
     oidcIssuer: getHttpsOrLoopbackUrl(issuerValue, 'OIDC_ISSUER'),
     oidcPrivateJwk: getOidcPrivateJwk(

@@ -9,7 +9,17 @@ import {
   GitHubAuthError,
   type GitHubAuthenticatedUser,
 } from '../lib/github'
-import { getUserAdmission, resolveGitHubIdentity } from '../lib/identity'
+import {
+  getUserAdmission,
+  GoogleAdmissionError,
+  resolveGitHubIdentity,
+  resolveGoogleIdentity,
+} from '../lib/identity'
+import {
+  authenticateGoogleUser,
+  GoogleAuthError,
+  type GoogleAuthenticatedUser,
+} from '../lib/google'
 
 const SESSION_COOKIE_NAME = 'giken_session'
 const SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60
@@ -17,6 +27,7 @@ const AUTH_CODE_LIFETIME_SECONDS = 2 * 60
 
 type AppContext = Context<{ Bindings: AppBindings }>
 type AuthenticateGitHubUser = typeof authenticateGitHubUser
+type AuthenticateGoogleUser = typeof authenticateGoogleUser
 
 interface OAuthStateRow {
   client_id: string
@@ -34,7 +45,7 @@ function includesScope(scope: string | null, required: string): boolean {
 }
 
 function hasRequiredOidcState(oauthState: OAuthStateRow): boolean {
-  return oauthState.provider === 'github' && includesScope(oauthState.scope, 'openid') && !!oauthState.nonce
+  return (oauthState.provider === 'github' || oauthState.provider === 'google') && includesScope(oauthState.scope, 'openid') && !!oauthState.nonce
 }
 
 interface AuditEvent {
@@ -43,6 +54,8 @@ interface AuditEvent {
   clientId?: string
   redirectUri?: string
   user?: GitHubAuthenticatedUser
+  googleUser?: GoogleAuthenticatedUser
+  provider?: 'github' | 'google'
   userId?: string
 }
 
@@ -71,7 +84,7 @@ function prepareAuditEvent(
     .bind(
       'callback',
       event.userId ?? null,
-      event.user ? 'github' : null,
+      event.provider ?? (event.user ? 'github' : event.googleUser ? 'google' : null),
       event.user?.githubId ?? null,
       event.user?.githubLogin ?? null,
       event.clientId ?? null,
@@ -109,6 +122,7 @@ function redirectWithError(redirectUri: string, state?: string | null): Response
 
 export function createCallbackHandler(
   authenticate: AuthenticateGitHubUser = authenticateGitHubUser,
+  authenticateGoogle: AuthenticateGoogleUser = authenticateGoogleUser,
 ): Handler<{ Bindings: AppBindings }> {
   return async (c) => {
     const code = c.req.query('code')
@@ -168,37 +182,74 @@ export function createCallbackHandler(
       return c.json({ error: 'invalid_request' }, 400)
     }
 
-    let user: GitHubAuthenticatedUser
+    let identity: { userId: string }
+    let user: GitHubAuthenticatedUser | undefined
+    let googleUser: GoogleAuthenticatedUser | undefined
 
-    try {
-      user = await authenticate(code, {
-        clientId: config.githubClientId,
-        clientSecret: config.githubClientSecret,
-        callbackUrl: config.githubCallbackUrl,
-        organization: config.githubOrg,
-      })
-    } catch (error) {
-      const reason =
-        error instanceof GitHubAuthError ? error.code : 'github_auth_failed'
+    if (oauthState.provider === 'google') {
+      try {
+        googleUser = await authenticateGoogle(code, {
+          clientId: config.googleClientId,
+          clientSecret: config.googleClientSecret,
+          callbackUrl: config.googleCallbackUrl,
+          allowedHostedDomains: config.googleAllowedHostedDomains,
+          nonce: oauthState.nonce!,
+        })
+        identity = await resolveGoogleIdentity(config.db, googleUser, occurredAt)
+      } catch (error) {
+        const reason =
+          error instanceof GoogleAuthError || error instanceof GoogleAdmissionError
+            ? error.code
+            : 'google_id_token_invalid'
 
-      await recordAuditEvent(
-        c,
-        config.db,
-        {
-          success: false,
-          reason,
-          clientId: oauthState.client_id,
-          redirectUri: oauthState.redirect_uri,
-        },
-        occurredAt,
-      )
+        await recordAuditEvent(
+          c,
+          config.db,
+          {
+            success: false,
+            provider: 'google',
+            reason,
+            clientId: oauthState.client_id,
+            redirectUri: oauthState.redirect_uri,
+          },
+          occurredAt,
+        )
 
-      return redirectWithError(oauthState.redirect_uri, oauthState.client_state)
+        return redirectWithError(oauthState.redirect_uri, oauthState.client_state)
+      }
+    } else {
+      try {
+        user = await authenticate(code, {
+          clientId: config.githubClientId,
+          clientSecret: config.githubClientSecret,
+          callbackUrl: config.githubCallbackUrl,
+          organization: config.githubOrg,
+        })
+      } catch (error) {
+        const reason =
+          error instanceof GitHubAuthError ? error.code : 'github_auth_failed'
+
+        await recordAuditEvent(
+          c,
+          config.db,
+          {
+            success: false,
+            provider: 'github',
+            reason,
+            clientId: oauthState.client_id,
+            redirectUri: oauthState.redirect_uri,
+          },
+          occurredAt,
+        )
+
+        return redirectWithError(oauthState.redirect_uri, oauthState.client_state)
+      }
+      identity = await resolveGitHubIdentity(config.db, user, occurredAt)
     }
 
-    const identity = await resolveGitHubIdentity(config.db, user, occurredAt)
-
-    const admission = await getUserAdmission(config.db, identity.userId)
+    const admission = oauthState.provider === 'google'
+      ? { allowed: true as const }
+      : await getUserAdmission(config.db, identity.userId)
 
     if (!admission.allowed) {
       await recordAuditEvent(
@@ -206,10 +257,12 @@ export function createCallbackHandler(
         config.db,
         {
           success: false,
+          provider: oauthState.provider as 'github' | 'google',
           reason: admission.reason,
           clientId: oauthState.client_id,
           redirectUri: oauthState.redirect_uri,
           user,
+          googleUser,
           userId: identity.userId,
         },
         occurredAt,
@@ -241,9 +294,9 @@ export function createCallbackHandler(
       config.db
         .prepare(
           `INSERT INTO auth_codes
-              (code_hash, user_id, client_id, redirect_uri, scope, nonce, provider,
-               auth_time, code_challenge, code_challenge_method, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               (code_hash, user_id, client_id, redirect_uri, scope, nonce, provider,
+                provider_user_id, auth_time, code_challenge, code_challenge_method, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           authCodeHash,
@@ -253,6 +306,7 @@ export function createCallbackHandler(
           oauthState.scope,
           oauthState.nonce,
           oauthState.provider,
+          oauthState.provider === 'google' ? googleUser!.googleSub : user!.githubId,
           occurredAt,
           oauthState.code_challenge,
           oauthState.code_challenge_method,
@@ -264,9 +318,11 @@ export function createCallbackHandler(
         config.db,
         {
           success: true,
+          provider: oauthState.provider as 'github' | 'google',
           clientId: oauthState.client_id,
           redirectUri: oauthState.redirect_uri,
           user,
+          googleUser,
           userId: identity.userId,
         },
         occurredAt,

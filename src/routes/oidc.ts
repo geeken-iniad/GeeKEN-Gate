@@ -3,11 +3,12 @@ import type { Context } from 'hono'
 import type { AppBindings } from '../lib/config'
 import { loadAuthServerConfig } from '../lib/config'
 import { generateRandomToken, hashAuthToken } from '../lib/crypto'
-import { getUserAdmission } from '../lib/identity'
+import { getGoogleIdentityAdmission, getUserAdmission } from '../lib/identity'
 import { publicJwkFromPrivate, signIdToken, verifyPkceChallenge } from '../lib/oidc'
 import { enforceRateLimit, getClientIp } from '../lib/rate-limit'
 
 const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize'
+const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 const OAUTH_STATE_LIFETIME_SECONDS = 10 * 60
 const ACCESS_TOKEN_LIFETIME_SECONDS = 60 * 60
 const ID_TOKEN_LIFETIME_SECONDS = 5 * 60
@@ -22,6 +23,7 @@ interface AuthCodeRow {
   scope: string | null
   nonce: string | null
   provider: string | null
+  provider_user_id: string | null
   auth_time: number | null
   code_challenge: string | null
   code_challenge_method: string | null
@@ -125,12 +127,12 @@ export async function handleAuthorize(c: AppContext): Promise<Response> {
     !state ||
     !nonce ||
     !provider ||
-    provider !== 'github' ||
+    (provider !== 'github' && provider !== 'google') ||
     (codeChallengeMethod !== undefined && codeChallengeMethod !== 'S256') ||
     (codeChallenge !== undefined && (!codeChallenge || !isValidPkceChallenge(codeChallenge))) ||
     (codeChallenge === undefined && codeChallengeMethod !== undefined)
 
-  if (invalid) return redirectError(redirectUri, provider === 'google' ? 'temporarily_unavailable' : 'invalid_request', state)
+  if (invalid) return redirectError(redirectUri, 'invalid_request', state)
 
   const upstreamState = generateRandomToken()
   const stateHash = await hashAuthToken(upstreamState, config.sessionSecret, 'oauth-state')
@@ -158,11 +160,23 @@ export async function handleAuthorize(c: AppContext): Promise<Response> {
     )
     .run()
 
-  const authorizeUrl = new URL(GITHUB_AUTHORIZE_URL)
-  authorizeUrl.searchParams.set('client_id', config.githubClientId)
-  authorizeUrl.searchParams.set('redirect_uri', config.githubCallbackUrl.href)
-  authorizeUrl.searchParams.set('scope', 'read:org')
-  authorizeUrl.searchParams.set('state', upstreamState)
+  const authorizeUrl = new URL(provider === 'google' ? GOOGLE_AUTHORIZE_URL : GITHUB_AUTHORIZE_URL)
+  if (provider === 'google') {
+    authorizeUrl.searchParams.set('response_type', 'code')
+    authorizeUrl.searchParams.set('client_id', config.googleClientId)
+    authorizeUrl.searchParams.set('redirect_uri', config.googleCallbackUrl.href)
+    authorizeUrl.searchParams.set('scope', 'openid email profile')
+    authorizeUrl.searchParams.set('state', upstreamState)
+    authorizeUrl.searchParams.set('nonce', nonce)
+    if (config.googleAllowedHostedDomains.length === 1) {
+      authorizeUrl.searchParams.set('hd', config.googleAllowedHostedDomains[0])
+    }
+  } else {
+    authorizeUrl.searchParams.set('client_id', config.githubClientId)
+    authorizeUrl.searchParams.set('redirect_uri', config.githubCallbackUrl.href)
+    authorizeUrl.searchParams.set('scope', 'read:org')
+    authorizeUrl.searchParams.set('state', upstreamState)
+  }
   c.header('Cache-Control', 'no-store')
   return c.redirect(authorizeUrl.href)
 }
@@ -224,15 +238,16 @@ export async function handleToken(c: AppContext): Promise<Response> {
   const now = Math.floor(Date.now() / 1000)
   const codeHash = await hashAuthToken(code, config.sessionSecret, 'auth-code')
   const authCode = await config.db.prepare(
-    `DELETE FROM auth_codes
-     WHERE code_hash = ? AND client_id = ? AND redirect_uri = ? AND expires_at > ?
-     RETURNING user_id, scope, nonce, provider, auth_time, code_challenge, code_challenge_method`,
+      `DELETE FROM auth_codes
+      WHERE code_hash = ? AND client_id = ? AND redirect_uri = ? AND expires_at > ?
+      RETURNING user_id, scope, nonce, provider, provider_user_id, auth_time, code_challenge, code_challenge_method`,
   ).bind(codeHash, credentials.clientId, redirectUri, now).first<AuthCodeRow>()
   if (authCode === null) return oidcError(c, 'invalid_grant')
   if (
     !includesScope(authCode.scope, 'openid') ||
     !authCode.nonce ||
-    authCode.provider !== 'github' ||
+    (authCode.provider !== 'github' && authCode.provider !== 'google') ||
+    (authCode.provider === 'google' && !authCode.provider_user_id) ||
     authCode.auth_time === null ||
     authCode.auth_time <= 0 ||
     (authCode.code_challenge === null && authCode.code_challenge_method !== null) ||
@@ -246,15 +261,17 @@ export async function handleToken(c: AppContext): Promise<Response> {
       return oidcError(c, 'invalid_grant')
     }
   }
-  const admission = await getUserAdmission(config.db, authCode.user_id)
+  const admission = authCode.provider === 'google'
+    ? await getGoogleIdentityAdmission(config.db, authCode.user_id, authCode.provider_user_id!)
+    : await getUserAdmission(config.db, authCode.user_id)
   if (!admission.allowed) return oidcError(c, 'access_denied', 403)
 
   const accessToken = generateRandomToken()
   const accessTokenHash = await hashAuthToken(accessToken, config.sessionSecret, 'access-token')
   await config.db.prepare(
-    `INSERT INTO access_tokens (token_hash, user_id, client_id, scope, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).bind(accessTokenHash, authCode.user_id, credentials.clientId, authCode.scope, now, now + ACCESS_TOKEN_LIFETIME_SECONDS).run()
+    `INSERT INTO access_tokens (token_hash, user_id, client_id, scope, provider, provider_user_id, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(accessTokenHash, authCode.user_id, credentials.clientId, authCode.scope, authCode.provider, authCode.provider_user_id, now, now + ACCESS_TOKEN_LIFETIME_SECONDS).run()
   const issuer = config.oidcIssuer.href.replace(/\/$/, '')
   const idToken = await signIdToken({
     iss: issuer,
@@ -277,16 +294,18 @@ export async function handleUserinfo(c: AppContext): Promise<Response> {
   const now = Math.floor(Date.now() / 1000)
   const tokenHash = await hashAuthToken(token, config.sessionSecret, 'access-token')
   const row = await config.db.prepare(
-    `SELECT access_tokens.user_id
+    `SELECT access_tokens.user_id, access_tokens.provider, access_tokens.provider_user_id
      FROM access_tokens
      INNER JOIN clients ON clients.client_id = access_tokens.client_id
      WHERE access_tokens.token_hash = ?
        AND access_tokens.expires_at > ?
        AND clients.disabled_at IS NULL
      LIMIT 1`,
-  ).bind(tokenHash, now).first<{ user_id: string }>()
+  ).bind(tokenHash, now).first<{ user_id: string; provider: string | null; provider_user_id: string | null }>()
   if (row === null) return oidcError(c, 'invalid_token', 401, 'Bearer realm="userinfo"')
-  const admission = await getUserAdmission(config.db, row.user_id)
+  const admission = row.provider === 'google' && row.provider_user_id
+    ? await getGoogleIdentityAdmission(config.db, row.user_id, row.provider_user_id)
+    : await getUserAdmission(config.db, row.user_id)
   if (!admission.allowed) return oidcError(c, 'invalid_token', 401, 'Bearer realm="userinfo"')
   c.header('Cache-Control', 'no-store')
   return c.json({ sub: row.user_id })

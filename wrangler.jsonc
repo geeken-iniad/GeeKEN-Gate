@@ -7,7 +7,9 @@
     "crons": ["0 3 * * *"]
   },
   "vars": {
-    "OIDC_ISSUER": "https://geeken-gate.example.com"
+    "OIDC_ISSUER": "https://geeken-gate.example.com",
+    "GOOGLE_CALLBACK_URL": "https://geeken-gate.example.com/callback",
+    "GOOGLE_ALLOWED_HD": "example.com"
   },
   "ratelimits": [
     {

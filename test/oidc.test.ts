@@ -23,6 +23,10 @@ function bindings(): AppBindings {
     GITHUB_CLIENT_SECRET: 'github-client-secret',
     GITHUB_ORG: 'example-org',
     GITHUB_CALLBACK_URL: 'https://auth.example.com/callback',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_CALLBACK_URL: 'https://auth.example.com/callback',
+    GOOGLE_ALLOWED_HD: 'example.com',
     SESSION_SECRET,
     OIDC_ISSUER: 'https://auth.example.com',
     OIDC_PRIVATE_JWK,
@@ -82,14 +86,22 @@ describe('OIDC provider endpoints', () => {
     expect(row).toEqual({ client_state: 'client-state', nonce: 'nonce-value', provider: 'github', code_challenge_method: 'S256' })
   })
 
-  it('rejects Google provider clearly before Google upstream support', async () => {
+  it('starts Google authorization with OIDC parameters and hd hint', async () => {
     const url = new URL('https://auth.example.com/authorize')
     url.search = new URLSearchParams({ response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT_URI, scope: 'openid', state: 's', nonce: 'n', provider: 'google' }).toString()
     const response = await app.request(url, {}, bindings())
     expect(response.status).toBe(302)
     const location = new URL(response.headers.get('location') ?? '')
-    expect(location.searchParams.get('error')).toBe('temporarily_unavailable')
-    expect(location.searchParams.get('state')).toBe('s')
+    expect(location.origin + location.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth')
+    expect(location.searchParams.get('response_type')).toBe('code')
+    expect(location.searchParams.get('client_id')).toBe('google-client-id')
+    expect(location.searchParams.get('redirect_uri')).toBe('https://auth.example.com/callback')
+    expect(location.searchParams.get('scope')).toBe('openid email profile')
+    expect(location.searchParams.get('nonce')).toBe('n')
+    expect(location.searchParams.get('hd')).toBe('example.com')
+    expect(location.searchParams.get('state')).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    const row = await env.DB.prepare(`SELECT client_state, nonce, provider FROM oauth_states`).first<{ client_state: string; nonce: string; provider: string }>()
+    expect(row).toEqual({ client_state: 's', nonce: 'n', provider: 'google' })
   })
 
   it.each([
@@ -172,6 +184,32 @@ describe('OIDC provider endpoints', () => {
     expect(userinfo.status).toBe(200)
     expect(userinfo.headers.get('cache-control')).toBe('no-store')
     await expect(userinfo.json()).resolves.toEqual({ sub: 'user-123' })
+  })
+
+  it('exchanges a Google-backed authorization code with internal user_id as subject', async () => {
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO members (member_id, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`).bind('member-1', 'Member One', 'active', NOW, NOW),
+      env.DB.prepare(`INSERT INTO member_emails (normalized_email, member_id, login_allowed, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`).bind('member@example.com', 'member-1', 1, NOW, NOW),
+      env.DB.prepare(`INSERT INTO users (user_id, member_id, created_at, updated_at) VALUES (?, ?, ?, ?)`).bind('internal-user-123', 'member-1', NOW, NOW),
+      env.DB.prepare(`INSERT INTO external_identities (provider, provider_user_id, user_id, provider_login, email, email_verified, hosted_domain, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind('google', 'google-sub-123', 'internal-user-123', 'Member One', 'member@example.com', 1, 'example.com', NOW, NOW),
+    ])
+    const codeHash = await hashAuthToken('google-code-value', SESSION_SECRET, 'auth-code')
+    await env.DB.prepare(
+      `INSERT INTO auth_codes (code_hash, user_id, client_id, redirect_uri, scope, nonce, provider, provider_user_id, auth_time, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(codeHash, 'internal-user-123', CLIENT_ID, REDIRECT_URI, 'openid', 'nonce-value', 'google', 'google-sub-123', NOW, NOW, Math.floor(Date.now() / 1000) + 60).run()
+
+    const response = await app.request('https://auth.example.com/token', {
+      method: 'POST',
+      headers: { Authorization: basic(), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', code: 'google-code-value', redirect_uri: REDIRECT_URI }),
+    }, bindings())
+
+    expect(response.status).toBe(200)
+    const body = await response.json() as { id_token: string }
+    const claims = JSON.parse(atob(body.id_token.split('.')[1].replaceAll('-', '+').replaceAll('_', '/')))
+    expect(claims.sub).toBe('internal-user-123')
+    expect(claims.sub).not.toBe('google-sub-123')
   })
 
   it('rejects /token when the linked member email is not allowed to log in', async () => {
