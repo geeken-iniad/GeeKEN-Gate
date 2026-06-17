@@ -15,12 +15,17 @@ type AppContext = Context<{ Bindings: AppBindings }>
 type AuthenticateGitHubUser = typeof authenticateGitHubUser
 
 interface OAuthStateRow {
+  client_state: string
   client_id: string
   redirect_uri: string
+  nonce: string
+  code_challenge: string
 }
 
 interface AuditEvent {
   success: boolean
+  provider: string
+  userId?: string
   reason?: string
   clientId?: string
   redirectUri?: string
@@ -45,12 +50,14 @@ function prepareAuditEvent(
   return database
     .prepare(
       `INSERT INTO auth_events
-         (event_type, github_id, github_login, client_id, redirect_uri,
-          success, reason, ip_address, user_agent, occurred_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (event_type, provider, user_id, github_id, github_login, client_id,
+          redirect_uri, success, reason, ip_address, user_agent, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       'callback',
+      event.provider,
+      event.userId ?? null,
       event.user?.githubId ?? null,
       event.user?.githubLogin ?? null,
       event.clientId ?? null,
@@ -72,9 +79,17 @@ async function recordAuditEvent(
   await prepareAuditEvent(c, database, event, occurredAt).run()
 }
 
-function redirectWithError(redirectUri: string): Response {
+function redirectWithError(
+  redirectUri: string,
+  clientState: string | null,
+  error = 'access_denied',
+): Response {
   const location = new URL(redirectUri)
-  location.searchParams.set('error', 'access_denied')
+  location.searchParams.set('error', error)
+
+  if (clientState !== null) {
+    location.searchParams.set('state', clientState)
+  }
 
   return new Response(null, {
     status: 302,
@@ -91,14 +106,14 @@ export function createCallbackHandler(
   return async (c) => {
     const code = c.req.query('code')
     const state = c.req.query('state')
-    const config = loadAuthServerConfig(c.env)
+    const config = await loadAuthServerConfig(c.env)
     const occurredAt = Math.floor(Date.now() / 1000)
 
     if (!code || !state) {
       await recordAuditEvent(
         c,
         config.db,
-        { success: false, reason: 'invalid_request' },
+        { success: false, provider: 'github', reason: 'invalid_request' },
         occurredAt,
       )
 
@@ -108,15 +123,15 @@ export function createCallbackHandler(
 
     const stateHash = await hashAuthToken(
       state,
-      config.sessionSecret,
-      'oauth-state',
+      config.tokenHashSecret,
+      'oauth-upstream-state',
     )
     const oauthState = await config.db
       .prepare(
         `DELETE FROM oauth_states
-         WHERE state_hash = ?
+         WHERE upstream_state_hash = ?
            AND expires_at > ?
-         RETURNING client_id, redirect_uri`,
+         RETURNING client_state, client_id, redirect_uri, nonce, code_challenge`,
       )
       .bind(stateHash, occurredAt)
       .first<OAuthStateRow>()
@@ -125,7 +140,7 @@ export function createCallbackHandler(
       await recordAuditEvent(
         c,
         config.db,
-        { success: false, reason: 'invalid_state' },
+        { success: false, provider: 'github', reason: 'invalid_state' },
         occurredAt,
       )
 
@@ -151,6 +166,7 @@ export function createCallbackHandler(
         config.db,
         {
           success: false,
+          provider: 'github',
           reason,
           clientId: oauthState.client_id,
           redirectUri: oauthState.redirect_uri,
@@ -158,66 +174,98 @@ export function createCallbackHandler(
         occurredAt,
       )
 
-      return redirectWithError(oauthState.redirect_uri)
+      return redirectWithError(
+        oauthState.redirect_uri,
+        oauthState.client_state,
+      )
     }
 
-    const frozenUser = await config.db
+    const identity = await config.db
       .prepare(
-        `SELECT 1
-         FROM frozen_users
+        `SELECT user_id, frozen_at
+         FROM github_identities
          WHERE github_id = ?
          LIMIT 1`,
       )
       .bind(user.githubId)
-      .first()
+      .first<{ user_id: string; frozen_at: number | null }>()
 
-    if (frozenUser !== null) {
-      await recordAuditEvent(
-        c,
-        config.db,
-        {
-          success: false,
-          reason: 'frozen_user',
-          clientId: oauthState.client_id,
-          redirectUri: oauthState.redirect_uri,
-          user,
-        },
-        occurredAt,
-      )
+    let userId: string
 
-      return redirectWithError(oauthState.redirect_uri)
+    if (identity === null) {
+      userId = crypto.randomUUID()
+      await config.db.batch([
+        config.db
+          .prepare(
+            `INSERT INTO users
+               (id, created_at, updated_at)
+             VALUES (?, ?, ?)`,
+          )
+          .bind(userId, occurredAt, occurredAt),
+        config.db
+          .prepare(
+            `INSERT INTO github_identities
+               (github_id, user_id, github_login, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .bind(user.githubId, userId, user.githubLogin, occurredAt, occurredAt),
+      ])
+    } else {
+      if (identity.frozen_at !== null) {
+        await recordAuditEvent(
+          c,
+          config.db,
+          {
+            success: false,
+            provider: 'github',
+            reason: 'frozen_user',
+            userId: identity.user_id,
+            clientId: oauthState.client_id,
+            redirectUri: oauthState.redirect_uri,
+            user,
+          },
+          occurredAt,
+        )
+
+        return redirectWithError(
+          oauthState.redirect_uri,
+          oauthState.client_state,
+        )
+      }
+
+      userId = identity.user_id
+      await config.db
+        .prepare(
+          `UPDATE github_identities
+           SET github_login = ?, updated_at = ?
+           WHERE github_id = ?`,
+        )
+        .bind(user.githubLogin, occurredAt, user.githubId)
+        .run()
     }
 
     const authCode = generateRandomToken()
     const authCodeHash = await hashAuthToken(
       authCode,
-      config.sessionSecret,
+      config.tokenHashSecret,
       'auth-code',
     )
 
     await config.db.batch([
       config.db
         .prepare(
-          `INSERT INTO users
-             (github_id, github_login, created_at, updated_at)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT (github_id) DO UPDATE SET
-             github_login = excluded.github_login,
-             updated_at = excluded.updated_at`,
-        )
-        .bind(user.githubId, user.githubLogin, occurredAt, occurredAt),
-      config.db
-        .prepare(
           `INSERT INTO auth_codes
-             (code_hash, github_id, client_id, redirect_uri,
-              created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+             (code_hash, user_id, client_id, redirect_uri, nonce,
+              code_challenge, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           authCodeHash,
-          user.githubId,
+          userId,
           oauthState.client_id,
           oauthState.redirect_uri,
+          oauthState.nonce,
+          oauthState.code_challenge,
           occurredAt,
           occurredAt + AUTH_CODE_LIFETIME_SECONDS,
         ),
@@ -226,6 +274,8 @@ export function createCallbackHandler(
         config.db,
         {
           success: true,
+          provider: 'github',
+          userId,
           clientId: oauthState.client_id,
           redirectUri: oauthState.redirect_uri,
           user,
@@ -234,12 +284,17 @@ export function createCallbackHandler(
       ),
     ])
 
-    c.header('Cache-Control', 'no-store')
-
     const redirectUrl = new URL(oauthState.redirect_uri)
     redirectUrl.searchParams.set('code', authCode)
+    redirectUrl.searchParams.set('state', oauthState.client_state)
 
-    return c.redirect(redirectUrl.href)
+    return new Response(null, {
+      status: 302,
+      headers: {
+        'Cache-Control': 'no-store',
+        Location: redirectUrl.href,
+      },
+    })
   }
 }
 

@@ -4,8 +4,6 @@ export async function cleanupExpiredAuthData(
   database: D1Database,
   currentTime: number,
 ): Promise<void> {
-  const authEventCutoff = currentTime - AUTH_EVENT_RETENTION_SECONDS
-
   await database.batch([
     database
       .prepare(
@@ -21,9 +19,21 @@ export async function cleanupExpiredAuthData(
       .bind(currentTime),
     database
       .prepare(
+        `DELETE FROM access_tokens
+         WHERE expires_at <= ?`,
+      )
+      .bind(currentTime),
+    database
+      .prepare(
+        `DELETE FROM refresh_tokens
+         WHERE expires_at <= ?`,
+      )
+      .bind(currentTime),
+    database
+      .prepare(
         `DELETE FROM auth_events
          WHERE occurred_at < ?`,
       )
-      .bind(authEventCutoff),
+      .bind(currentTime - AUTH_EVENT_RETENTION_SECONDS),
   ])
 }

@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  generateClientSecret,
+  generateCodeChallenge,
+  generateCodeVerifier,
   generateRandomToken,
   hashAuthToken,
-  hashClientSecret,
-  verifyClientSecret,
+  verifyHashedToken,
 } from '../src/lib/crypto'
 
 const LOWERCASE_SHA256_HEX = /^[0-9a-f]{64}$/
@@ -14,7 +14,7 @@ const BASE64URL_32_BYTES = /^[A-Za-z0-9_-]{43}$/
 describe('random credential generation', () => {
   it('generates URL-safe tokens with 32 bytes of entropy', () => {
     expect(generateRandomToken()).toMatch(BASE64URL_32_BYTES)
-    expect(generateClientSecret()).toMatch(BASE64URL_32_BYTES)
+    expect(generateCodeVerifier()).toMatch(BASE64URL_32_BYTES)
   })
 
   it('generates a different value on each call', () => {
@@ -26,17 +26,37 @@ describe('random credential generation', () => {
   })
 })
 
+describe('PKCE generation', () => {
+  it('generates an S256 code challenge from a verifier', async () => {
+    const verifier = generateCodeVerifier()
+    const challenge = await generateCodeChallenge(verifier)
+
+    expect(challenge).toMatch(/^[A-Za-z0-9_-]{43}$/)
+
+    const digest = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(verifier),
+    )
+    const expected = btoa(String.fromCharCode(...new Uint8Array(digest)))
+      .replaceAll('+', '-')
+      .replaceAll('/', '_')
+      .replace(/=+$/, '')
+
+    expect(challenge).toBe(expected)
+  })
+})
+
 describe('authentication token hashing', () => {
   it('returns a deterministic lowercase SHA-256 HMAC', async () => {
     const firstHash = await hashAuthToken(
       'token-value',
-      'session-secret',
-      'oauth-state',
+      'hash-secret',
+      'auth-code',
     )
     const secondHash = await hashAuthToken(
       'token-value',
-      'session-secret',
-      'oauth-state',
+      'hash-secret',
+      'auth-code',
     )
 
     expect(firstHash).toMatch(LOWERCASE_SHA256_HEX)
@@ -45,29 +65,31 @@ describe('authentication token hashing', () => {
 
   it('separates hashes by purpose', async () => {
     const hashes = await Promise.all([
-      hashAuthToken('token-value', 'session-secret', 'oauth-state'),
-      hashAuthToken('token-value', 'session-secret', 'auth-code'),
-      hashAuthToken('other-value', 'session-secret', 'oauth-state'),
+      hashAuthToken('token-value', 'hash-secret', 'oauth-upstream-state'),
+      hashAuthToken('token-value', 'hash-secret', 'auth-code'),
+      hashAuthToken('token-value', 'hash-secret', 'access-token'),
+      hashAuthToken('token-value', 'hash-secret', 'refresh-token'),
+      hashAuthToken('other-value', 'hash-secret', 'auth-code'),
     ])
 
-    expect(new Set(hashes).size).toBe(3)
+    expect(new Set(hashes).size).toBe(5)
   })
 
   it('changes when the value or secret changes', async () => {
     const original = await hashAuthToken(
       'token-value',
-      'session-secret',
-      'oauth-state',
+      'hash-secret',
+      'auth-code',
     )
     const changedValue = await hashAuthToken(
       'other-token',
-      'session-secret',
-      'oauth-state',
+      'hash-secret',
+      'auth-code',
     )
     const changedSecret = await hashAuthToken(
       'token-value',
       'other-secret',
-      'oauth-state',
+      'auth-code',
     )
 
     expect(changedValue).not.toBe(original)
@@ -76,34 +98,47 @@ describe('authentication token hashing', () => {
 
   it('rejects an empty HMAC secret', async () => {
     await expect(
-      hashAuthToken('token-value', '', 'oauth-state'),
+      hashAuthToken('token-value', '', 'auth-code'),
     ).rejects.toThrow('HMAC secret must not be empty')
   })
 })
 
-describe('client secret hashing and verification', () => {
-  it('hashes a client secret as lowercase SHA-256 hex', async () => {
-    const hash = await hashClientSecret('client-secret')
+describe('hash verification', () => {
+  it('accepts only the matching token', async () => {
+    const hash = await hashAuthToken('token-value', 'hash-secret', 'auth-code')
 
-    expect(hash).toMatch(LOWERCASE_SHA256_HEX)
-  })
-
-  it('accepts only the matching client secret', async () => {
-    const hash = await hashClientSecret('client-secret')
-
-    await expect(verifyClientSecret('client-secret', hash)).resolves.toBe(true)
-    await expect(verifyClientSecret('wrong-secret', hash)).resolves.toBe(false)
+    await expect(
+      verifyHashedToken('token-value', hash, 'hash-secret', 'auth-code'),
+    ).resolves.toBe(true)
+    await expect(
+      verifyHashedToken('wrong-value', hash, 'hash-secret', 'auth-code'),
+    ).resolves.toBe(false)
   })
 
   it('returns false for malformed stored hashes', async () => {
     await expect(
-      verifyClientSecret('client-secret', 'a'.repeat(63)),
+      verifyHashedToken(
+        'token-value',
+        'a'.repeat(63),
+        'hash-secret',
+        'auth-code',
+      ),
     ).resolves.toBe(false)
     await expect(
-      verifyClientSecret('client-secret', 'A'.repeat(64)),
+      verifyHashedToken(
+        'token-value',
+        'A'.repeat(64),
+        'hash-secret',
+        'auth-code',
+      ),
     ).resolves.toBe(false)
     await expect(
-      verifyClientSecret('client-secret', `${'a'.repeat(63)}g`),
+      verifyHashedToken(
+        'token-value',
+        `${'a'.repeat(63)}g`,
+        'hash-secret',
+        'auth-code',
+      ),
     ).resolves.toBe(false)
   })
 })

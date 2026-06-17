@@ -1,8 +1,13 @@
 const TOKEN_BYTE_LENGTH = 32
 const SHA256_BYTE_LENGTH = 32
+const CODE_VERIFIER_BYTE_LENGTH = 32
 const textEncoder = new TextEncoder()
 
-export type AuthTokenPurpose = 'oauth-state' | 'auth-code'
+export type AuthTokenPurpose =
+  | 'oauth-upstream-state'
+  | 'auth-code'
+  | 'access-token'
+  | 'refresh-token'
 
 type TimingSafeSubtleCrypto = SubtleCrypto & {
   timingSafeEqual(
@@ -47,11 +52,19 @@ async function sha256(value: string): Promise<Uint8Array> {
 }
 
 export function generateRandomToken(): string {
-  return bytesToBase64Url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTE_LENGTH)))
+  return bytesToBase64Url(
+    crypto.getRandomValues(new Uint8Array(TOKEN_BYTE_LENGTH)),
+  )
 }
 
-export function generateClientSecret(): string {
-  return generateRandomToken()
+export function generateCodeVerifier(): string {
+  return bytesToBase64Url(
+    crypto.getRandomValues(new Uint8Array(CODE_VERIFIER_BYTE_LENGTH)),
+  )
+}
+
+export async function generateCodeChallenge(verifier: string): Promise<string> {
+  return bytesToBase64Url(await sha256(verifier))
 }
 
 export async function hashAuthToken(
@@ -79,20 +92,20 @@ export async function hashAuthToken(
   return bytesToHex(new Uint8Array(signature))
 }
 
-export async function hashClientSecret(clientSecret: string): Promise<string> {
-  return bytesToHex(await sha256(clientSecret))
-}
-
-export async function verifyClientSecret(
-  clientSecret: string,
+export async function verifyHashedToken(
+  value: string,
   expectedHash: string,
+  secret: string,
+  purpose: AuthTokenPurpose,
 ): Promise<boolean> {
-  const actualHash = await sha256(clientSecret)
-  const parsedExpectedHash = hexToBytes(expectedHash)
-  const comparisonHash =
-    parsedExpectedHash ?? new Uint8Array(SHA256_BYTE_LENGTH)
-  const subtleCrypto = crypto.subtle as TimingSafeSubtleCrypto
-  const matches = subtleCrypto.timingSafeEqual(actualHash, comparisonHash)
+  const actualHash = await hashAuthToken(value, secret, purpose)
+  const actualBytes = hexToBytes(actualHash)
+  const expectedBytes = hexToBytes(expectedHash)
 
-  return parsedExpectedHash !== null && matches
+  if (actualBytes === null || expectedBytes === null) {
+    return false
+  }
+
+  const subtleCrypto = crypto.subtle as TimingSafeSubtleCrypto
+  return subtleCrypto.timingSafeEqual(actualBytes, expectedBytes)
 }

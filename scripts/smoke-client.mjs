@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto'
 import http from 'node:http'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -6,7 +7,6 @@ const DEFAULT_PORT = 3000
 const REQUIRED_ENVIRONMENT_VARIABLES = [
   'GATE_BASE_URL',
   'SMOKE_CLIENT_ID',
-  'SMOKE_CLIENT_SECRET',
   'SMOKE_REDIRECT_URI',
 ]
 
@@ -66,7 +66,6 @@ export function loadConfig(environment = process.env) {
   return {
     gateBaseUrl: new URL(gateBaseUrl.href.replace(/\/+$/, '') + '/'),
     clientId: environment.SMOKE_CLIENT_ID,
-    clientSecret: environment.SMOKE_CLIENT_SECRET,
     redirectUri: redirectUri.href,
     port,
   }
@@ -79,6 +78,19 @@ export function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;')
+}
+
+function base64Url(bytes) {
+  return bytes.toString('base64url').replace(/=+$/, '')
+}
+
+export function generatePKCE() {
+  const verifier = base64Url(randomBytes(32))
+  const challenge = base64Url(createHash('sha256').update(verifier).digest())
+  const state = base64Url(randomBytes(32))
+  const nonce = base64Url(randomBytes(32))
+
+  return { verifier, challenge, state, nonce }
 }
 
 function redact(value, secrets) {
@@ -139,29 +151,39 @@ function writeRedirect(response, location) {
   response.end()
 }
 
-export function buildLoginUrl(config) {
-  const loginUrl = new URL('login', config.gateBaseUrl)
-  loginUrl.searchParams.set('client_id', config.clientId)
-  loginUrl.searchParams.set('redirect_uri', config.redirectUri)
+export function buildAuthorizeUrl(config, pkce) {
+  const authorizeUrl = new URL('authorize', config.gateBaseUrl)
+  authorizeUrl.searchParams.set('client_id', config.clientId)
+  authorizeUrl.searchParams.set('redirect_uri', config.redirectUri)
+  authorizeUrl.searchParams.set('response_type', 'code')
+  authorizeUrl.searchParams.set('scope', 'openid')
+  authorizeUrl.searchParams.set('state', pkce.state)
+  authorizeUrl.searchParams.set('nonce', pkce.nonce)
+  authorizeUrl.searchParams.set('code_challenge', pkce.challenge)
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256')
+  authorizeUrl.searchParams.set('provider', 'github')
 
-  return loginUrl.href
+  return authorizeUrl.href
 }
 
-export async function exchangeCode(config, code, fetchImplementation = fetch) {
+export async function exchangeCode(
+  config,
+  code,
+  verifier,
+  fetchImplementation = fetch,
+) {
   const body = new URLSearchParams({
-    code,
+    grant_type: 'authorization_code',
+    client_id: config.clientId,
     redirect_uri: config.redirectUri,
+    code,
+    code_verifier: verifier,
   })
-  const authorization = Buffer.from(
-    `${config.clientId}:${config.clientSecret}`,
-    'utf8',
-  ).toString('base64')
   const response = await fetchImplementation(
-    new URL('exchange', config.gateBaseUrl),
+    new URL('token', config.gateBaseUrl),
     {
       method: 'POST',
       headers: {
-        Authorization: `Basic ${authorization}`,
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body,
@@ -183,14 +205,46 @@ export async function exchangeCode(config, code, fetchImplementation = fetch) {
   }
 }
 
-function renderExchangeResult(label, result, secrets) {
+export async function fetchUserinfo(
+  config,
+  accessToken,
+  fetchImplementation = fetch,
+) {
+  const response = await fetchImplementation(
+    new URL('userinfo', config.gateBaseUrl),
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+  )
+  const text = await response.text()
+  let responseBody = text
+
+  try {
+    responseBody = JSON.parse(text)
+  } catch {
+    // Keep non-JSON error bodies readable.
+  }
+
+  return {
+    status: response.status,
+    ok: response.ok,
+    body: responseBody,
+  }
+}
+
+function renderResult(label, result, secrets) {
   return `<h2>${escapeHtml(label)}</h2>
 <p>Status: <strong>${result.status}</strong></p>
 <pre>${formatBody(result.body, secrets)}</pre>`
 }
 
 export function createRequestHandler(config, dependencies = {}) {
+  const createPkce = dependencies.generatePKCE ?? generatePKCE
   const requestExchange = dependencies.exchangeCode ?? exchangeCode
+  const requestUserinfo = dependencies.fetchUserinfo ?? fetchUserinfo
+  const pkceStore = dependencies.pkceStore ?? new Map()
 
   return async (request, response) => {
     if (request.method !== 'GET') {
@@ -209,14 +263,19 @@ export function createRequestHandler(config, dependencies = {}) {
         200,
         page(
           'GeeKEN Gate Smoke Client',
-          '<p><a href="/login">Start GitHub OAuth login</a></p>',
+          '<p><a href="/login">Start OIDC Authorization Code login</a></p>',
         ),
       )
       return
     }
 
     if (requestUrl.pathname === '/login') {
-      writeRedirect(response, buildLoginUrl(config))
+      const pkce = createPkce()
+      pkceStore.set(pkce.state, {
+        verifier: pkce.verifier,
+        nonce: pkce.nonce,
+      })
+      writeRedirect(response, buildAuthorizeUrl(config, pkce))
       return
     }
 
@@ -230,7 +289,7 @@ export function createRequestHandler(config, dependencies = {}) {
     if (errors.length > 0) {
       const message =
         errors.length === 1 && errors[0]
-          ? escapeHtml(redact(errors[0], [config.clientSecret]))
+          ? escapeHtml(errors[0])
           : 'Invalid OAuth error response'
       writeHtml(
         response,
@@ -241,6 +300,7 @@ export function createRequestHandler(config, dependencies = {}) {
     }
 
     const codes = requestUrl.searchParams.getAll('code')
+    const states = requestUrl.searchParams.getAll('state')
 
     if (codes.length !== 1 || !codes[0]) {
       writeHtml(
@@ -255,27 +315,68 @@ export function createRequestHandler(config, dependencies = {}) {
     }
 
     const code = codes[0]
+    const state = states.length === 1 ? states[0] : null
+    const pkce = state !== null ? pkceStore.get(state) : undefined
+
+    if (!pkce) {
+      writeHtml(
+        response,
+        400,
+        page(
+          'OAuth Failed',
+          '<p class="error">The callback state did not match a pending login.</p>',
+        ),
+      )
+      return
+    }
+
+    pkceStore.delete(state)
+    const secrets = [code, pkce.verifier]
 
     try {
-      const first = await requestExchange(config, code)
-      const second = await requestExchange(config, code)
+      const first = await requestExchange(config, code, pkce.verifier)
+      const second = await requestExchange(config, code, pkce.verifier)
       const firstSummary = first.ok
-        ? '<p class="ok"><strong>First exchange succeeded.</strong></p>'
-        : '<p class="error"><strong>First exchange failed.</strong></p>'
+        ? '<p class="ok"><strong>First token request succeeded.</strong></p>'
+        : '<p class="error"><strong>First token request failed.</strong></p>'
       const secondSummary = second.ok
         ? '<p class="error"><strong>ERROR: Reusing the code unexpectedly succeeded.</strong></p>'
-        : '<p class="ok"><strong>Second exchange failed as expected.</strong></p>'
-      const secrets = [config.clientSecret, code]
+        : '<p class="ok"><strong>Second token request failed as expected.</strong></p>'
+
+      let userinfoSection = ''
+      let userinfoOk = false
+      if (
+        first.ok &&
+        typeof first.body === 'object' &&
+        first.body !== null
+      ) {
+        if (typeof first.body.access_token === 'string') {
+          secrets.push(first.body.access_token)
+        }
+        if (typeof first.body.refresh_token === 'string') {
+          secrets.push(first.body.refresh_token)
+        }
+        const accessToken =
+          typeof first.body.access_token === 'string'
+            ? first.body.access_token
+            : ''
+        if (accessToken) {
+          const userinfo = await requestUserinfo(config, accessToken)
+          userinfoOk = userinfo.ok
+          userinfoSection = renderResult('UserInfo', userinfo, secrets)
+        }
+      }
 
       writeHtml(
         response,
-        first.ok && !second.ok ? 200 : 502,
+        first.ok && !second.ok && userinfoOk ? 200 : 502,
         page(
-          'OAuth Smoke Test Result',
+          'OIDC Smoke Test Result',
           `${firstSummary}
-${renderExchangeResult('First exchange', first, secrets)}
+${renderResult('First token request', first, secrets)}
 ${secondSummary}
-${renderExchangeResult('Second exchange', second, secrets)}`,
+${renderResult('Second token request', second, secrets)}
+${userinfoSection}`,
         ),
       )
     } catch {
@@ -283,8 +384,8 @@ ${renderExchangeResult('Second exchange', second, secrets)}`,
         response,
         502,
         page(
-          'OAuth Smoke Test Result',
-          '<p class="error">The exchange request could not be completed.</p>',
+          'OIDC Smoke Test Result',
+          '<p class="error">The token request could not be completed.</p>',
         ),
       )
     }

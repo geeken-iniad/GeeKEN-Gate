@@ -5,22 +5,23 @@ import { describe, expect, it } from 'vitest'
 const NOW = 1_700_000_000
 const HASH_A = 'a'.repeat(64)
 const HASH_B = 'b'.repeat(64)
+const USER_ID = 'user-uuid'
 
-async function insertUser(githubId = '100', githubLogin = 'octocat') {
+async function insertUser(userId = USER_ID) {
   await env.DB.prepare(
-    `INSERT INTO users (github_id, github_login, created_at, updated_at)
-     VALUES (?, ?, ?, ?)`,
+    `INSERT INTO users (id, created_at, updated_at)
+     VALUES (?, ?, ?)`,
   )
-    .bind(githubId, githubLogin, NOW, NOW)
+    .bind(userId, NOW, NOW)
     .run()
 }
 
 async function insertClient(clientId = 'client-a') {
   await env.DB.prepare(
-    `INSERT INTO clients (client_id, client_secret_hash, created_at)
-     VALUES (?, ?, ?)`,
+    `INSERT INTO clients (client_id, created_at)
+     VALUES (?, ?)`,
   )
-    .bind(clientId, HASH_A, NOW)
+    .bind(clientId, NOW)
     .run()
 }
 
@@ -65,15 +66,20 @@ describe('initial migration', () => {
     expect(tableNames).toEqual(
       expect.arrayContaining([
         'users',
-        'frozen_users',
+        'github_identities',
+        'google_identities',
+        'google_login_allowlist',
         'clients',
         'allowed_redirect_uris',
         'oauth_states',
         'auth_codes',
+        'access_tokens',
+        'refresh_tokens',
         'auth_events',
       ]),
     )
     expect(tableNames).not.toContain('sessions')
+    expect(tableNames).not.toContain('frozen_users')
   })
 
   it('creates all required indexes', async () => {
@@ -86,11 +92,25 @@ describe('initial migration', () => {
 
     expect(indexNames).toEqual(
       expect.arrayContaining([
+        'idx_github_identities_user_id',
+        'idx_github_identities_frozen_at',
+        'idx_google_identities_user_id',
+        'idx_google_allowlist_user_id',
+        'idx_google_allowlist_disabled_at',
+        'idx_clients_disabled_at',
         'idx_oauth_states_expires_at',
-        'idx_auth_codes_github_id',
+        'idx_auth_codes_user_id',
         'idx_auth_codes_expires_at',
+        'idx_access_tokens_user_id',
+        'idx_access_tokens_client_id',
+        'idx_access_tokens_expires_at',
+        'idx_refresh_tokens_user_id',
+        'idx_refresh_tokens_client_id',
+        'idx_refresh_tokens_expires_at',
+        'idx_refresh_tokens_revoked_at',
         'idx_auth_events_occurred_at',
         'idx_auth_events_event_type_occurred_at',
+        'idx_auth_events_user_id_occurred_at',
         'idx_auth_events_github_id_occurred_at',
         'idx_auth_events_client_id_occurred_at',
       ]),
@@ -99,14 +119,14 @@ describe('initial migration', () => {
     expect(indexNames).not.toContain('idx_sessions_expires_at')
   })
 
-  it('stores only the client secret hash', async () => {
+  it('does not store a client secret', async () => {
     const result = await env.DB.prepare(
       `SELECT name
        FROM pragma_table_info('clients')`,
     ).all<{ name: string }>()
     const columnNames = result.results.map(({ name }) => name)
 
-    expect(columnNames).toContain('client_secret_hash')
+    expect(columnNames).not.toContain('client_secret_hash')
     expect(columnNames).not.toContain('client_secret')
   })
 
@@ -133,24 +153,33 @@ describe('valid records', () => {
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO oauth_states
-           (state_hash, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?)`,
+           (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+            code_challenge, code_challenge_method, provider, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         HASH_A,
+        'client-state',
         'client-a',
         'https://client.example/callback',
+        'nonce',
+        'challenge',
+        'S256',
+        'github',
         NOW,
         NOW + 60,
       ),
       env.DB.prepare(
         `INSERT INTO auth_codes
-           (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (code_hash, user_id, client_id, redirect_uri, nonce,
+            code_challenge, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         HASH_B,
-        '100',
+        USER_ID,
         'client-a',
         'https://client.example/callback',
+        'nonce',
+        'challenge',
         NOW,
         NOW + 60,
       ),
@@ -160,29 +189,20 @@ describe('valid records', () => {
     expect(await countRows('auth_codes')).toBe(1)
   })
 
-  it('freezes a GitHub ID that has not logged in', async () => {
-    await env.DB.prepare(
-      `INSERT INTO frozen_users (github_id, frozen_at, reason)
-       VALUES (?, ?, ?)`,
-    )
-      .bind('999', NOW, 'manual freeze')
-      .run()
-
-    expect(await countRows('frozen_users')).toBe(1)
-  })
-
   it('stores success and failure audit events without related records', async () => {
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO auth_events
-           (event_type, github_id, github_login, client_id, redirect_uri,
-            success, ip_address, user_agent, occurred_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (event_type, provider, user_id, github_id, github_login, client_id,
+            redirect_uri, success, ip_address, user_agent, occurred_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         'callback',
-        'missing-user',
+        'github',
+        null,
+        '123',
         'octocat',
-        'missing-client',
+        'client-a',
         'https://client.example/callback',
         1,
         '203.0.113.10',
@@ -193,7 +213,7 @@ describe('valid records', () => {
         `INSERT INTO auth_events
            (event_type, success, reason, occurred_at)
          VALUES (?, ?, ?, ?)`,
-      ).bind('exchange', 0, 'invalid_code', NOW),
+      ).bind('token', 0, 'invalid_code', NOW),
     ])
 
     expect(await countRows('auth_events')).toBe(2)
@@ -212,37 +232,43 @@ describe('uniqueness constraints', () => {
   it('rejects duplicate state and authorization code hashes', async () => {
     await insertUser()
     await insertClientWithRedirect()
-    const statements = [
-      env.DB.prepare(
-        `INSERT INTO oauth_states
-           (state_hash, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      ).bind(
-        HASH_A,
-        'client-a',
-        'https://client.example/callback',
-        NOW,
-        NOW + 60,
-      ),
-      env.DB.prepare(
-        `INSERT INTO auth_codes
-           (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).bind(
-        HASH_B,
-        '100',
-        'client-a',
-        'https://client.example/callback',
-        NOW,
-        NOW + 60,
-      ),
-    ]
 
-    await env.DB.batch(statements)
+    const stateStatement = env.DB.prepare(
+      `INSERT INTO oauth_states
+         (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+          code_challenge, code_challenge_method, provider, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      HASH_A,
+      'client-state',
+      'client-a',
+      'https://client.example/callback',
+      'nonce',
+      'challenge',
+      'S256',
+      'github',
+      NOW,
+      NOW + 60,
+    )
+    const codeStatement = env.DB.prepare(
+      `INSERT INTO auth_codes
+         (code_hash, user_id, client_id, redirect_uri, nonce,
+          code_challenge, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      HASH_B,
+      USER_ID,
+      'client-a',
+      'https://client.example/callback',
+      'nonce',
+      'challenge',
+      NOW,
+      NOW + 60,
+    )
 
-    for (const statement of statements) {
-      await expect(statement.run()).rejects.toThrow()
-    }
+    await env.DB.batch([stateStatement, codeStatement])
+    await expect(stateStatement.run()).rejects.toThrow()
+    await expect(codeStatement.run()).rejects.toThrow()
   })
 
   it('rejects a duplicate redirect URI for the same client', async () => {
@@ -267,21 +293,6 @@ describe('hash constraints', () => {
   ] as const
 
   it.each(invalidHashes)(
-    'rejects a %s client secret hash',
-    async (_caseName, hash) => {
-      await expect(
-        env.DB.prepare(
-          `INSERT INTO clients
-             (client_id, client_secret_hash, created_at)
-           VALUES (?, ?, ?)`,
-        )
-          .bind('client-a', hash, NOW)
-          .run(),
-      ).rejects.toThrow()
-    },
-  )
-
-  it.each(invalidHashes)(
     'rejects a %s OAuth state hash',
     async (_caseName, hash) => {
       await insertClientWithRedirect()
@@ -289,13 +300,19 @@ describe('hash constraints', () => {
       await expect(
         env.DB.prepare(
           `INSERT INTO oauth_states
-             (state_hash, client_id, redirect_uri, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?)`,
+             (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+              code_challenge, code_challenge_method, provider, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             hash,
+            'client-state',
             'client-a',
             'https://client.example/callback',
+            'nonce',
+            'challenge',
+            'S256',
+            'github',
             NOW,
             NOW + 60,
           )
@@ -313,17 +330,37 @@ describe('hash constraints', () => {
       await expect(
         env.DB.prepare(
           `INSERT INTO auth_codes
-             (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+             (code_hash, user_id, client_id, redirect_uri, nonce,
+              code_challenge, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             hash,
-            '100',
+            USER_ID,
             'client-a',
             'https://client.example/callback',
+            'nonce',
+            'challenge',
             NOW,
             NOW + 60,
           )
+          .run(),
+      ).rejects.toThrow()
+    },
+  )
+
+  it.each(invalidHashes)(
+    'rejects a %s Google allowlist email hash',
+    async (_caseName, hash) => {
+      await insertUser()
+
+      await expect(
+        env.DB.prepare(
+          `INSERT INTO google_login_allowlist
+             (email_hash, pepper_version, user_id, created_at, disabled_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+          .bind(hash, 1, USER_ID, NOW, null)
           .run(),
       ).rejects.toThrow()
     },
@@ -338,24 +375,33 @@ describe('time and value constraints', () => {
     const statements = [
       env.DB.prepare(
         `INSERT INTO oauth_states
-           (state_hash, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?)`,
+           (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+            code_challenge, code_challenge_method, provider, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         HASH_A,
+        'client-state',
         'client-a',
         'https://client.example/callback',
+        'nonce',
+        'challenge',
+        'S256',
+        'github',
         NOW,
         NOW,
       ),
       env.DB.prepare(
         `INSERT INTO auth_codes
-           (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (code_hash, user_id, client_id, redirect_uri, nonce,
+            code_challenge, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         HASH_B,
-        '100',
+        USER_ID,
         'client-a',
         'https://client.example/callback',
+        'nonce',
+        'challenge',
         NOW,
         NOW,
       ),
@@ -366,37 +412,18 @@ describe('time and value constraints', () => {
     }
   })
 
-  it('rejects a disabled time before client creation', async () => {
-    await expect(
-      env.DB.prepare(
-        `INSERT INTO clients
-           (client_id, client_secret_hash, created_at, disabled_at)
-         VALUES (?, ?, ?, ?)`,
-      )
-        .bind('client-a', HASH_A, NOW, NOW - 1)
-        .run(),
-    ).rejects.toThrow()
-  })
-
   it('rejects non-positive timestamps', async () => {
-    await insertUser()
-    await insertClientWithRedirect()
+    await insertClient()
 
     const statements = [
       env.DB.prepare(
-        `INSERT INTO users
-           (github_id, github_login, created_at, updated_at)
-         VALUES (?, ?, ?, ?)`,
-      ).bind('101', 'hubot', 0, NOW),
-      env.DB.prepare(
-        `INSERT INTO frozen_users (github_id, frozen_at)
-         VALUES (?, ?)`,
-      ).bind('999', 0),
-      env.DB.prepare(
-        `INSERT INTO clients
-           (client_id, client_secret_hash, created_at)
+        `INSERT INTO users (id, created_at, updated_at)
          VALUES (?, ?, ?)`,
-      ).bind('client-b', HASH_B, 0),
+      ).bind('101', 0, NOW),
+      env.DB.prepare(
+        `INSERT INTO clients (client_id, created_at)
+         VALUES (?, ?)`,
+      ).bind('client-b', 0),
       env.DB.prepare(
         `INSERT INTO allowed_redirect_uris
            (client_id, redirect_uri, created_at)
@@ -404,24 +431,18 @@ describe('time and value constraints', () => {
       ).bind('client-a', 'https://client.example/other', 0),
       env.DB.prepare(
         `INSERT INTO oauth_states
-           (state_hash, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?)`,
+           (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+            code_challenge, code_challenge_method, provider, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         HASH_A,
+        'client-state',
         'client-a',
         'https://client.example/callback',
-        0,
-        NOW,
-      ),
-      env.DB.prepare(
-        `INSERT INTO auth_codes
-           (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).bind(
-        HASH_B,
-        '100',
-        'client-a',
-        'https://client.example/callback',
+        'nonce',
+        'challenge',
+        'S256',
+        'github',
         0,
         NOW,
       ),
@@ -436,29 +457,23 @@ describe('time and value constraints', () => {
     }
   })
 
-  it('rejects empty required identifiers and labels', async () => {
+  it('rejects empty required identifiers', async () => {
     await insertClient()
 
     const statements = [
       env.DB.prepare(
-        `INSERT INTO users
-           (github_id, github_login, created_at, updated_at)
-         VALUES (?, ?, ?, ?)`,
-      ).bind('', 'octocat', NOW, NOW),
+        `INSERT INTO users (id, created_at, updated_at)
+         VALUES (?, ?, ?)`,
+      ).bind('', NOW, NOW),
       env.DB.prepare(
-        `INSERT INTO users
-           (github_id, github_login, created_at, updated_at)
+        `INSERT INTO github_identities
+           (github_id, user_id, created_at, updated_at)
          VALUES (?, ?, ?, ?)`,
-      ).bind('100', '', NOW, NOW),
+      ).bind('', USER_ID, NOW, NOW),
       env.DB.prepare(
-        `INSERT INTO frozen_users (github_id, frozen_at)
+        `INSERT INTO clients (client_id, created_at)
          VALUES (?, ?)`,
       ).bind('', NOW),
-      env.DB.prepare(
-        `INSERT INTO clients
-           (client_id, client_secret_hash, created_at)
-         VALUES (?, ?, ?)`,
-      ).bind('', HASH_A, NOW),
       env.DB.prepare(
         `INSERT INTO allowed_redirect_uris
            (client_id, redirect_uri, created_at)
@@ -500,14 +515,17 @@ describe('foreign keys and redirect URI matching', () => {
     await expect(
       env.DB.prepare(
         `INSERT INTO auth_codes
-           (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (code_hash, user_id, client_id, redirect_uri, nonce,
+            code_challenge, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
         .bind(
           HASH_B,
           'missing-user',
           'client-a',
           'https://client.example/callback',
+          'nonce',
+          'challenge',
           NOW,
           NOW + 60,
         )
@@ -536,24 +554,39 @@ describe('foreign keys and redirect URI matching', () => {
       await expect(
         env.DB.prepare(
           `INSERT INTO oauth_states
-             (state_hash, client_id, redirect_uri, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?)`,
+             (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+              code_challenge, code_challenge_method, provider, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-          .bind(HASH_A, clientId, redirectUri, NOW, NOW + 60)
+          .bind(
+            HASH_A,
+            'client-state',
+            clientId,
+            redirectUri,
+            'nonce',
+            'challenge',
+            'S256',
+            'github',
+            NOW,
+            NOW + 60,
+          )
           .run(),
       ).rejects.toThrow()
 
       await expect(
         env.DB.prepare(
           `INSERT INTO auth_codes
-             (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+             (code_hash, user_id, client_id, redirect_uri, nonce,
+              code_challenge, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             HASH_B,
-            '100',
+            USER_ID,
             clientId,
             redirectUri,
+            'nonce',
+            'challenge',
             NOW,
             NOW + 60,
           )
@@ -567,24 +600,25 @@ describe('cascade deletion and audit retention', () => {
   it('deletes authorization codes with their user', async () => {
     await insertUser()
     await insertClientWithRedirect()
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO auth_codes
-           (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).bind(
+    await env.DB.prepare(
+      `INSERT INTO auth_codes
+         (code_hash, user_id, client_id, redirect_uri, nonce,
+          code_challenge, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
         HASH_B,
-        '100',
+        USER_ID,
         'client-a',
         'https://client.example/callback',
+        'nonce',
+        'challenge',
         NOW,
         NOW + 60,
-      ),
-    ])
-
-    await env.DB.prepare('DELETE FROM users WHERE github_id = ?')
-      .bind('100')
+      )
       .run()
+
+    await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(USER_ID).run()
 
     expect(await countRows('auth_codes')).toBe(0)
   })
@@ -595,24 +629,33 @@ describe('cascade deletion and audit retention', () => {
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO oauth_states
-           (state_hash, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?)`,
+           (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+            code_challenge, code_challenge_method, provider, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         HASH_A,
+        'client-state',
         'client-a',
         'https://client.example/callback',
+        'nonce',
+        'challenge',
+        'S256',
+        'github',
         NOW,
         NOW + 60,
       ),
       env.DB.prepare(
         `INSERT INTO auth_codes
-           (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (code_hash, user_id, client_id, redirect_uri, nonce,
+            code_challenge, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         HASH_B,
-        '100',
+        USER_ID,
         'client-a',
         'https://client.example/callback',
+        'nonce',
+        'challenge',
         NOW,
         NOW + 60,
       ),
@@ -632,14 +675,14 @@ describe('cascade deletion and audit retention', () => {
     await insertClient()
     await env.DB.prepare(
       `INSERT INTO auth_events
-         (event_type, github_id, client_id, success, occurred_at)
+         (event_type, user_id, client_id, success, occurred_at)
        VALUES (?, ?, ?, ?, ?)`,
     )
-      .bind('callback', '100', 'client-a', 1, NOW)
+      .bind('callback', USER_ID, 'client-a', 1, NOW)
       .run()
 
     await env.DB.batch([
-      env.DB.prepare('DELETE FROM users WHERE github_id = ?').bind('100'),
+      env.DB.prepare('DELETE FROM users WHERE id = ?').bind(USER_ID),
       env.DB.prepare('DELETE FROM clients WHERE client_id = ?').bind(
         'client-a',
       ),

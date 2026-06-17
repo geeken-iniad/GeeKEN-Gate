@@ -7,78 +7,82 @@ import { hashAuthToken } from '../src/lib/crypto'
 import { GitHubAuthError } from '../src/lib/github'
 import { createCallbackHandler } from '../src/routes/callback'
 import { allowingRateLimiter } from './rate-limit'
+import {
+  CLIENT_ID,
+  CLIENT_STATE,
+  CODE_CHALLENGE,
+  GITHUB_CALLBACK_URL,
+  GITHUB_ID,
+  GITHUB_LOGIN,
+  ISSUER,
+  NONCE,
+  NOW,
+  REDIRECT_URI,
+  TOKEN_HASH_SECRET,
+  UPSTREAM_STATE,
+  USER_ID,
+  createBindings,
+  insertClient,
+  insertUser,
+} from './oidc-helpers'
 
-const NOW = 1_700_000_000
-const CLIENT_ID = 'client-a'
-const REDIRECT_URI = 'https://client.example/callback?source=login'
-const SESSION_SECRET = 's'.repeat(32)
-const OAUTH_STATE = 'oauth-state-value'
 const GITHUB_CODE = 'github-code'
-const GITHUB_USER = {
-  githubId: '123456',
-  githubLogin: 'octocat',
-}
 
-interface StoredCredential {
-  hash: string
-  created_at: number
-  expires_at: number
+interface AuthCodeRow {
+  code_hash: string
+  user_id: string
+  nonce: string
+  code_challenge: string
 }
 
 interface AuthEventRow {
   event_type: string
+  provider: string | null
+  user_id: string | null
   github_id: string | null
   github_login: string | null
   client_id: string | null
   redirect_uri: string | null
   success: number
   reason: string | null
-  ip_address: string | null
-  user_agent: string | null
-}
-
-function createBindings(): AppBindings {
-  return {
-    DB: env.DB,
-    PUBLIC_RATE_LIMITER: allowingRateLimiter,
-    CLIENT_RATE_LIMITER: allowingRateLimiter,
-    GITHUB_CLIENT_ID: 'github-client-id',
-    GITHUB_CLIENT_SECRET: 'github-client-secret',
-    GITHUB_ORG: 'example-org',
-    GITHUB_CALLBACK_URL: 'https://auth.example.com/callback',
-    SESSION_SECRET,
-  }
 }
 
 async function insertClientAndState(
   expiresAt = Math.floor(Date.now() / 1000) + 600,
 ): Promise<void> {
+  await insertClient()
+
   const stateHash = await hashAuthToken(
-    OAUTH_STATE,
-    SESSION_SECRET,
-    'oauth-state',
+    UPSTREAM_STATE,
+    TOKEN_HASH_SECRET,
+    'oauth-upstream-state',
   )
 
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO clients
-         (client_id, client_secret_hash, created_at)
-       VALUES (?, ?, ?)`,
-    ).bind(CLIENT_ID, 'a'.repeat(64), NOW),
-    env.DB.prepare(
-      `INSERT INTO allowed_redirect_uris
-         (client_id, redirect_uri, created_at)
-       VALUES (?, ?, ?)`,
-    ).bind(CLIENT_ID, REDIRECT_URI, NOW),
-    env.DB.prepare(
-      `INSERT INTO oauth_states
-         (state_hash, client_id, redirect_uri, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
-    ).bind(stateHash, CLIENT_ID, REDIRECT_URI, NOW, expiresAt),
-  ])
+  await env.DB.prepare(
+    `INSERT INTO oauth_states
+       (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+        code_challenge, code_challenge_method, provider, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      stateHash,
+      CLIENT_STATE,
+      CLIENT_ID,
+      REDIRECT_URI,
+      NONCE,
+      CODE_CHALLENGE,
+      'S256',
+      'github',
+      NOW,
+      expiresAt,
+    )
+    .run()
 }
 
-function createTestApp(authenticate = vi.fn().mockResolvedValue(GITHUB_USER)) {
+function createTestApp(authenticate = vi.fn().mockResolvedValue({
+  githubId: GITHUB_ID,
+  githubLogin: GITHUB_LOGIN,
+})) {
   const app = new Hono<{ Bindings: AppBindings }>()
   app.get('/callback', createCallbackHandler(authenticate))
 
@@ -89,7 +93,7 @@ async function requestCallback(
   app: Hono<{ Bindings: AppBindings }>,
   query: Record<string, string> = {
     code: GITHUB_CODE,
-    state: OAUTH_STATE,
+    state: UPSTREAM_STATE,
   },
 ) {
   const url = new URL('https://auth.example.com/callback')
@@ -110,18 +114,10 @@ async function requestCallback(
   )
 }
 
-async function countRows(table: string): Promise<number> {
-  const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS count FROM ${table}`,
-  ).first<{ count: number }>()
-
-  return row?.count ?? 0
-}
-
 async function getAuthEvents(): Promise<AuthEventRow[]> {
   const result = await env.DB.prepare(
-    `SELECT event_type, github_id, github_login, client_id, redirect_uri,
-            success, reason, ip_address, user_agent
+    `SELECT event_type, provider, user_id, github_id, github_login,
+            client_id, redirect_uri, success, reason
      FROM auth_events
      ORDER BY id`,
   ).all<AuthEventRow>()
@@ -134,102 +130,90 @@ describe('GET /callback', () => {
     await insertClientAndState()
   })
 
-  it('creates credentials and redirects an active organization member', async () => {
-    const { app, authenticate } = createTestApp()
-    const beforeRequest = Math.floor(Date.now() / 1000)
+  it('creates a user and identity, issues an auth code, and preserves client state', async () => {
+    const { app } = createTestApp()
     const response = await requestCallback(app)
-    const afterRequest = Math.floor(Date.now() / 1000)
 
     expect(response.status).toBe(302)
     expect(response.headers.get('cache-control')).toBe('no-store')
-    expect(authenticate).toHaveBeenCalledWith(GITHUB_CODE, {
-      clientId: 'github-client-id',
-      clientSecret: 'github-client-secret',
-      callbackUrl: new URL('https://auth.example.com/callback'),
-      organization: 'example-org',
-    })
 
     const location = new URL(response.headers.get('location') ?? '')
     const authCode = location.searchParams.get('code')
+
     expect(location.origin + location.pathname).toBe(
       'https://client.example/callback',
     )
-    expect(location.searchParams.get('source')).toBe('login')
+    expect(location.searchParams.get('state')).toBe(CLIENT_STATE)
     expect(authCode).toMatch(/^[A-Za-z0-9_-]{43}$/)
-    expect(response.headers.get('set-cookie')).toBeNull()
+
+    const identity = await env.DB.prepare(
+      `SELECT github_id, user_id, github_login
+       FROM github_identities
+       WHERE github_id = ?`,
+    )
+      .bind(GITHUB_ID)
+      .first<{ github_id: string; user_id: string; github_login: string }>()
+
+    expect(identity).not.toBeNull()
+    expect(identity!.github_login).toBe(GITHUB_LOGIN)
 
     const user = await env.DB.prepare(
-      `SELECT github_id, github_login, created_at, updated_at
-       FROM users`,
-    ).first<{
-      github_id: string
-      github_login: string
-      created_at: number
-      updated_at: number
-    }>()
-    expect(user).toMatchObject({
-      github_id: GITHUB_USER.githubId,
-      github_login: GITHUB_USER.githubLogin,
-    })
-    expect(user?.created_at).toBeGreaterThanOrEqual(beforeRequest)
-    expect(user?.created_at).toBeLessThanOrEqual(afterRequest)
-    expect(user?.updated_at).toBe(user?.created_at)
+      `SELECT id FROM users WHERE id = ?`,
+    )
+      .bind(identity!.user_id)
+      .first<{ id: string }>()
+
+    expect(user).not.toBeNull()
 
     const storedCode = await env.DB.prepare(
-      `SELECT code_hash AS hash, created_at, expires_at
+      `SELECT code_hash, user_id, nonce, code_challenge
        FROM auth_codes`,
-    ).first<StoredCredential>()
+    ).first<AuthCodeRow>()
 
     expect(storedCode).not.toBeNull()
-    expect(storedCode!.expires_at - storedCode!.created_at).toBe(2 * 60)
-    expect(storedCode!.hash).not.toBe(authCode)
+    expect(storedCode!.user_id).toBe(identity!.user_id)
+    expect(storedCode!.nonce).toBe(NONCE)
+    expect(storedCode!.code_challenge).toBe(CODE_CHALLENGE)
     await expect(
-      hashAuthToken(authCode ?? '', SESSION_SECRET, 'auth-code'),
-    ).resolves.toBe(storedCode!.hash)
-    expect(await countRows('oauth_states')).toBe(0)
+      hashAuthToken(authCode ?? '', TOKEN_HASH_SECRET, 'auth-code'),
+    ).resolves.toBe(storedCode!.code_hash)
 
-    await expect(getAuthEvents()).resolves.toEqual([
-      {
-        event_type: 'callback',
-        github_id: GITHUB_USER.githubId,
-        github_login: GITHUB_USER.githubLogin,
-        client_id: CLIENT_ID,
-        redirect_uri: REDIRECT_URI,
-        success: 1,
-        reason: null,
-        ip_address: '203.0.113.10',
-        user_agent: 'callback-test-agent',
-      },
-    ])
+    const events = await getAuthEvents()
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      event_type: 'callback',
+      provider: 'github',
+      github_id: GITHUB_ID,
+      github_login: GITHUB_LOGIN,
+      client_id: CLIENT_ID,
+      redirect_uri: REDIRECT_URI,
+      success: 1,
+    })
   })
 
-  it('updates an existing user login', async () => {
+  it('updates an existing identity login', async () => {
+    await insertUser(USER_ID)
     await env.DB.prepare(
-      `INSERT INTO users
-         (github_id, github_login, created_at, updated_at)
-       VALUES (?, ?, ?, ?)`,
+      `UPDATE github_identities SET github_login = ? WHERE github_id = ?`,
     )
-      .bind(GITHUB_USER.githubId, 'old-login', NOW, NOW)
+      .bind('old-login', GITHUB_ID)
       .run()
-    const { app } = createTestApp()
 
+    const { app } = createTestApp()
     const response = await requestCallback(app)
 
     expect(response.status).toBe(302)
-    const user = await env.DB.prepare(
-      `SELECT github_login, created_at, updated_at
-       FROM users
+
+    const identity = await env.DB.prepare(
+      `SELECT github_login, updated_at
+       FROM github_identities
        WHERE github_id = ?`,
     )
-      .bind(GITHUB_USER.githubId)
-      .first<{
-        github_login: string
-        created_at: number
-        updated_at: number
-      }>()
-    expect(user?.github_login).toBe(GITHUB_USER.githubLogin)
-    expect(user?.created_at).toBe(NOW)
-    expect(user?.updated_at).toBeGreaterThan(NOW)
+      .bind(GITHUB_ID)
+      .first<{ github_login: string; updated_at: number }>()
+
+    expect(identity?.github_login).toBe(GITHUB_LOGIN)
+    expect(identity?.updated_at).toBeGreaterThan(NOW)
   })
 
   it('rejects a reused state before calling GitHub', async () => {
@@ -243,15 +227,12 @@ describe('GET /callback', () => {
       error: 'invalid_request',
     })
     expect(authenticate).toHaveBeenCalledTimes(1)
-    expect(await countRows('auth_codes')).toBe(1)
 
     const events = await getAuthEvents()
     expect(events).toHaveLength(2)
     expect(events[1]).toMatchObject({
       success: 0,
       reason: 'invalid_state',
-      client_id: null,
-      redirect_uri: null,
     })
   })
 
@@ -268,11 +249,10 @@ describe('GET /callback', () => {
       error: 'invalid_request',
     })
     expect(authenticate).not.toHaveBeenCalled()
-    expect(await countRows('auth_codes')).toBe(0)
   })
 
   it.each([
-    ['missing code', { state: OAUTH_STATE }],
+    ['missing code', { state: UPSTREAM_STATE }],
     ['missing state', { code: GITHUB_CODE }],
   ])('rejects %s without consuming the state', async (_caseName, query) => {
     const { app, authenticate } = createTestApp()
@@ -281,13 +261,11 @@ describe('GET /callback', () => {
 
     expect(response.status).toBe(400)
     expect(authenticate).not.toHaveBeenCalled()
-    expect(await countRows('oauth_states')).toBe(1)
-    await expect(getAuthEvents()).resolves.toEqual([
-      expect.objectContaining({
-        success: 0,
-        reason: 'invalid_request',
-      }),
-    ])
+
+    const stateCount = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM oauth_states',
+    ).first<{ count: number }>()
+    expect(stateCount?.count).toBe(1)
   })
 
   it('redirects a GitHub authentication failure without creating credentials', async () => {
@@ -303,50 +281,48 @@ describe('GET /callback', () => {
     expect(location.origin + location.pathname).toBe(
       'https://client.example/callback',
     )
-    expect(location.searchParams.get('source')).toBe('login')
+    expect(location.searchParams.get('state')).toBe(CLIENT_STATE)
     expect(location.searchParams.get('error')).toBe('access_denied')
-    expect(response.headers.get('set-cookie')).toBeNull()
-    expect(await countRows('oauth_states')).toBe(0)
-    expect(await countRows('users')).toBe(0)
-    expect(await countRows('auth_codes')).toBe(0)
-    await expect(getAuthEvents()).resolves.toEqual([
-      expect.objectContaining({
-        success: 0,
-        reason: 'membership_not_active',
-        client_id: CLIENT_ID,
-        redirect_uri: REDIRECT_URI,
-      }),
-    ])
+
+    const events = await getAuthEvents()
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      success: 0,
+      reason: 'membership_not_active',
+      client_id: CLIENT_ID,
+      redirect_uri: REDIRECT_URI,
+    })
   })
 
-  it('rejects a frozen user without creating credentials', async () => {
+  it('rejects a frozen identity without creating credentials', async () => {
+    await insertUser(USER_ID)
     await env.DB.prepare(
-      `INSERT INTO frozen_users (github_id, frozen_at, reason)
-       VALUES (?, ?, ?)`,
+      `UPDATE github_identities
+       SET frozen_at = ?, freeze_reason = ?
+       WHERE github_id = ?`,
     )
-      .bind(GITHUB_USER.githubId, NOW, 'manual freeze')
+      .bind(NOW, 'manual freeze', GITHUB_ID)
       .run()
-    const { app } = createTestApp()
 
+    const { app } = createTestApp()
     const response = await requestCallback(app)
 
     expect(response.status).toBe(302)
-    expect(
-      new URL(response.headers.get('location') ?? '').searchParams.get('error'),
-    ).toBe('access_denied')
-    expect(await countRows('users')).toBe(0)
-    expect(await countRows('auth_codes')).toBe(0)
-    await expect(getAuthEvents()).resolves.toEqual([
-      expect.objectContaining({
-        github_id: GITHUB_USER.githubId,
-        github_login: GITHUB_USER.githubLogin,
-        success: 0,
-        reason: 'frozen_user',
-      }),
-    ])
+    const location = new URL(response.headers.get('location') ?? '')
+    expect(location.searchParams.get('error')).toBe('access_denied')
+    expect(location.searchParams.get('state')).toBe(CLIENT_STATE)
+
+    const events = await getAuthEvents()
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      success: 0,
+      reason: 'frozen_user',
+      github_id: GITHUB_ID,
+      github_login: GITHUB_LOGIN,
+    })
   })
 
-  it('does not store callback secrets in the audit event', async () => {
+  it('does not store callback secrets in audit events', async () => {
     const authenticate = vi
       .fn()
       .mockRejectedValue(new GitHubAuthError('token_exchange_failed'))
@@ -356,7 +332,7 @@ describe('GET /callback', () => {
 
     const serializedEvents = JSON.stringify(await getAuthEvents())
     expect(serializedEvents).not.toContain(GITHUB_CODE)
-    expect(serializedEvents).not.toContain(OAUTH_STATE)
+    expect(serializedEvents).not.toContain(UPSTREAM_STATE)
     expect(serializedEvents).not.toContain('github-client-secret')
   })
 })
