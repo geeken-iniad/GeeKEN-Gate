@@ -5,7 +5,7 @@ import type { AppBindings } from './config'
 type AppContext = Context<{ Bindings: AppBindings }>
 
 interface RateLimitContext {
-  route: '/authorize' | '/token' | '/userinfo' | '/health' | '/callback'
+  route: '/authorize' | '/token' | '/userinfo' | '/health' | '/callback/github'
   scope: 'ip' | 'client' | 'global'
   clientId?: string
 }

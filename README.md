@@ -26,7 +26,7 @@ pnpm db:migrate:local
 GITHUB_CLIENT_ID=<GitHub OAuth App client ID>
 GITHUB_CLIENT_SECRET=<GitHub OAuth App client secret>
 GITHUB_ORG=<Organization login>
-GITHUB_CALLBACK_URL=http://127.0.0.1:8787/callback
+GITHUB_CALLBACK_URL=http://127.0.0.1:8787/callback/github
 OIDC_ISSUER=http://127.0.0.1:8787
 OIDC_SIGNING_PRIVATE_KEY=<RSA private JWK JSON for RS256>
 OIDC_SIGNING_KEY_ID=<kid>
@@ -38,7 +38,7 @@ TOKEN_HASH_SECRET=<32 bytes or longer random secret for token hashes>
 GitHub OAuth App には次を設定します。
 
 - Homepage URL: `http://127.0.0.1:8787`
-- Authorization callback URL: `http://127.0.0.1:8787/callback`
+- Authorization callback URL: `http://127.0.0.1:8787/callback/github`
 - Device Flow: 無効
 
 Worker を起動します。
@@ -52,7 +52,8 @@ pnpm dev
 - `GET /.well-known/openid-configuration`
 - `GET /jwks.json`
 - `GET /authorize`
-- `GET /callback`（本仕様では最終的に `/callback/github` へ移行予定）
+- `GET /callback/github`
+- `GET /callback/google`（Phase 4 で実装予定）
 - `POST /token`
 - `GET /userinfo`
 - `POST /userinfo`
@@ -91,7 +92,7 @@ pnpm exec wrangler d1 execute DB --remote --command \
 http://127.0.0.1:8787/authorize?client_id=my-client&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&response_type=code&scope=openid&state=<state>&nonce=<nonce>&code_challenge=<challenge>&code_challenge_method=S256&provider=github
 ```
 
-Phase 2 では `provider` を省略した場合、一時的に GitHub をデフォルトとします。Google login と最終的な provider 選択 UI は後続フェーズで実装します。
+`provider` を省略した場合、GitHub と Google を選択できる最小の 2 ボタン画面を表示します。Google login は Phase 4 で実装予定であり、現時点では「利用不可」の画面を返します。
 
 GitHub 認証成功後、登録済み redirect URI に 2 分間有効な `code` と元の client `state` が付与されます。クライアントはその code を `/token` で交換します。
 
@@ -220,7 +221,7 @@ pnpm exec wrangler secret put OIDC_SIGNING_KEY_ID
 pnpm exec wrangler secret put TOKEN_HASH_SECRET
 ```
 
-GitHub OAuth App の callback URL を公開 Worker の `/callback` へ変更します（最終的には `/callback/github` へ移行予定）。
+GitHub OAuth App の callback URL を公開 Worker の `/callback/github` へ設定します。
 
 ### GitHub Actions CI/CD
 
@@ -330,6 +331,5 @@ pnpm check
 
 以下は後続フェーズで対応します。
 
-- provider 選択 UI と Google login
-- `/callback` から最終的な `/callback/github` への命名変更
+- Google login の実装
 - Google allowlist CLI

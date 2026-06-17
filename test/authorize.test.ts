@@ -87,6 +87,35 @@ async function requestAuthorize(
   )
 }
 
+async function text(response: Response): Promise<string> {
+  return response.text()
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replaceAll('&amp;', '&')
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&#39;', "'")
+}
+
+function expectPreservedAuthorizeRequest(
+  url: URL,
+  provider: 'github' | 'google',
+  codeChallenge: string,
+): void {
+  expect(url.searchParams.get('client_id')).toBe(CLIENT_ID)
+  expect(url.searchParams.get('redirect_uri')).toBe(REDIRECT_URI)
+  expect(url.searchParams.get('response_type')).toBe('code')
+  expect(url.searchParams.get('scope')).toBe('openid')
+  expect(url.searchParams.get('state')).toBe(CLIENT_STATE)
+  expect(url.searchParams.get('nonce')).toBe(NONCE)
+  expect(url.searchParams.get('code_challenge')).toBe(codeChallenge)
+  expect(url.searchParams.get('code_challenge_method')).toBe('S256')
+  expect(url.searchParams.get('provider')).toBe(provider)
+}
+
 describe('GET /authorize', () => {
   let codeChallenge: string
 
@@ -95,9 +124,10 @@ describe('GET /authorize', () => {
     codeChallenge = await generateCodeChallenge(CODE_VERIFIER)
   })
 
-  it('stores a hashed upstream state and redirects to GitHub', async () => {
+  it('with provider=github stores a hashed upstream state and redirects to GitHub', async () => {
     const response = await requestAuthorize({
       code_challenge: codeChallenge,
+      provider: 'github',
     })
 
     expect(response.status).toBe(302)
@@ -111,7 +141,7 @@ describe('GET /authorize', () => {
     )
     expect(location.searchParams.get('client_id')).toBe('github-client-id')
     expect(location.searchParams.get('redirect_uri')).toBe(
-      'https://auth.example.com/callback',
+      'https://auth.example.com/callback/github',
     )
     expect(location.searchParams.get('scope')).toBe('read:org')
     expect(upstreamState).toMatch(/^[A-Za-z0-9_-]{43}$/)
@@ -136,20 +166,87 @@ describe('GET /authorize', () => {
     ).resolves.toBe(rows[0].upstream_state_hash)
   })
 
-  it('defaults a missing provider to github as a temporary Phase 2 behavior', async () => {
-    const response = await requestAuthorize({ provider: undefined as unknown as string })
+  it('without provider renders a GitHub/Google selection page preserving the request', async () => {
+    const response = await requestAuthorize({
+      code_challenge: codeChallenge,
+      provider: undefined as unknown as string,
+    })
 
-    expect(response.status).toBe(302)
-    expect((await getOAuthStates())[0]?.provider).toBe('github')
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/html')
+    expect(response.headers.get('cache-control')).toBe('no-store')
+
+    const body = await text(response)
+    expect(body).toContain('Choose a sign-in method')
+    expect(body).toContain('Continue with GitHub')
+    expect(body).toContain('Continue with Google')
+
+    const githubLinkMatch = body.match(/href="([^"]*provider=github[^"]*)"/)
+    const googleLinkMatch = body.match(/href="([^"]*provider=google[^"]*)"/)
+
+    expect(githubLinkMatch).not.toBeNull()
+    expect(googleLinkMatch).not.toBeNull()
+
+    const githubLink = new URL(decodeHtmlEntities(githubLinkMatch![1]!))
+    expectPreservedAuthorizeRequest(githubLink, 'github', codeChallenge)
+
+    const googleLink = new URL(decodeHtmlEntities(googleLinkMatch![1]!))
+    expectPreservedAuthorizeRequest(googleLink, 'google', codeChallenge)
+
+    await expect(getOAuthStates()).resolves.toHaveLength(0)
   })
 
-  it('rejects unsupported providers with a clear temporary error', async () => {
-    const response = await requestAuthorize({ provider: 'google' })
+  it('with provider=google renders a controlled unavailable page', async () => {
+    const response = await requestAuthorize({
+      code_challenge: codeChallenge,
+      provider: 'google',
+    })
 
     expect(response.status).toBe(400)
-    await expect(response.json()).resolves.toMatchObject({
-      error: 'invalid_request',
+    expect(response.headers.get('content-type')).toContain('text/html')
+    expect(response.headers.get('cache-control')).toBe('no-store')
+
+    const body = await text(response)
+    expect(body).toContain('Google sign-in is not available')
+
+    const githubLinkMatch = body.match(/href="([^"]*provider=github[^"]*)"/)
+    expect(githubLinkMatch).not.toBeNull()
+
+    const githubLink = new URL(decodeHtmlEntities(githubLinkMatch![1]!))
+    expectPreservedAuthorizeRequest(githubLink, 'github', codeChallenge)
+
+    await expect(getOAuthStates()).resolves.toHaveLength(0)
+  })
+
+  it('rejects duplicate provider parameters', async () => {
+    const url = buildAuthorizeUrl({
+      client_id: CLIENT_ID,
+      redirect_uri: REDIRECT_URI,
+      response_type: 'code',
+      scope: 'openid',
+      state: CLIENT_STATE,
+      nonce: NONCE,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
+      provider: 'github',
     })
+    url.searchParams.append('provider', 'google')
+
+    const response = await app.request(url, undefined, createBindings())
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({ error: 'invalid_request' })
+    await expect(getOAuthStates()).resolves.toHaveLength(0)
+  })
+
+  it('rejects unsupported providers', async () => {
+    const response = await requestAuthorize({
+      code_challenge: codeChallenge,
+      provider: 'microsoft',
+    })
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({ error: 'invalid_request' })
     await expect(getOAuthStates()).resolves.toHaveLength(0)
   })
 
@@ -226,7 +323,7 @@ describe('GET /authorize', () => {
     } as RateLimit
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const response = await requestAuthorize(
-      { code_challenge: codeChallenge },
+      { code_challenge: codeChallenge, provider: 'github' },
       { PUBLIC_RATE_LIMITER: limiter },
       {
         'CF-Connecting-IP': '203.0.113.30',
@@ -258,7 +355,7 @@ describe('GET /authorize', () => {
     } as RateLimit
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     const response = await requestAuthorize(
-      { code_challenge: codeChallenge },
+      { code_challenge: codeChallenge, provider: 'github' },
       { PUBLIC_RATE_LIMITER: limiter },
       {
         'CF-Connecting-IP': '203.0.113.30',

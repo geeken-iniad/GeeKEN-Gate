@@ -1,11 +1,13 @@
 import { env } from 'cloudflare:workers'
 import { Hono } from 'hono'
+
+import { app as gateApp } from '../src/index'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AppBindings } from '../src/lib/config'
 import { hashAuthToken } from '../src/lib/crypto'
 import { GitHubAuthError } from '../src/lib/github'
-import { createCallbackHandler } from '../src/routes/callback'
+import { createCallbackHandler } from '../src/routes/callback-github'
 import { allowingRateLimiter } from './rate-limit'
 import {
   CLIENT_ID,
@@ -14,7 +16,6 @@ import {
   GITHUB_CALLBACK_URL,
   GITHUB_ID,
   GITHUB_LOGIN,
-  ISSUER,
   NONCE,
   NOW,
   REDIRECT_URI,
@@ -84,7 +85,7 @@ function createTestApp(authenticate = vi.fn().mockResolvedValue({
   githubLogin: GITHUB_LOGIN,
 })) {
   const app = new Hono<{ Bindings: AppBindings }>()
-  app.get('/callback', createCallbackHandler(authenticate))
+  app.get('/callback/github', createCallbackHandler(authenticate))
 
   return { app, authenticate }
 }
@@ -96,7 +97,7 @@ async function requestCallback(
     state: UPSTREAM_STATE,
   },
 ) {
-  const url = new URL('https://auth.example.com/callback')
+  const url = new URL('https://auth.example.com/callback/github')
 
   for (const [name, value] of Object.entries(query)) {
     url.searchParams.set(name, value)
@@ -125,7 +126,15 @@ async function getAuthEvents(): Promise<AuthEventRow[]> {
   return result.results
 }
 
-describe('GET /callback', () => {
+async function countAuthCodes(): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM auth_codes`,
+  ).first<{ count: number }>()
+
+  return row?.count ?? 0
+}
+
+describe('GET /callback/github', () => {
   beforeEach(async () => {
     await insertClientAndState()
   })
@@ -311,12 +320,13 @@ describe('GET /callback', () => {
     const location = new URL(response.headers.get('location') ?? '')
     expect(location.searchParams.get('error')).toBe('access_denied')
     expect(location.searchParams.get('state')).toBe(CLIENT_STATE)
+    await expect(countAuthCodes()).resolves.toBe(0)
 
     const events = await getAuthEvents()
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({
       success: 0,
-      reason: 'frozen_user',
+      reason: 'frozen_identity',
       github_id: GITHUB_ID,
       github_login: GITHUB_LOGIN,
     })
@@ -334,5 +344,15 @@ describe('GET /callback', () => {
     expect(serializedEvents).not.toContain(GITHUB_CODE)
     expect(serializedEvents).not.toContain(UPSTREAM_STATE)
     expect(serializedEvents).not.toContain('github-client-secret')
+  })
+
+  it('returns 404 for the legacy /callback path', async () => {
+    const response = await gateApp.request(
+      `https://auth.example.com/callback?code=${GITHUB_CODE}&state=${UPSTREAM_STATE}`,
+      {},
+      createBindings(),
+    )
+
+    expect(response.status).toBe(404)
   })
 })

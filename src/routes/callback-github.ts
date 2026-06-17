@@ -2,7 +2,7 @@ import type { Context, Handler } from 'hono'
 
 import type { AppBindings } from '../lib/config'
 import { loadAuthServerConfig } from '../lib/config'
-import { generateRandomToken, hashAuthToken } from '../lib/crypto'
+import { generateRandomToken, hashAuthToken, verifyHashedToken } from '../lib/crypto'
 import {
   authenticateGitHubUser,
   GitHubAuthError,
@@ -20,6 +20,7 @@ interface OAuthStateRow {
   redirect_uri: string
   nonce: string
   code_challenge: string
+  upstream_state_hash: string
 }
 
 interface AuditEvent {
@@ -131,12 +132,21 @@ export function createCallbackHandler(
         `DELETE FROM oauth_states
          WHERE upstream_state_hash = ?
            AND expires_at > ?
-         RETURNING client_state, client_id, redirect_uri, nonce, code_challenge`,
+         RETURNING client_state, client_id, redirect_uri, nonce, code_challenge,
+                  upstream_state_hash`,
       )
       .bind(stateHash, occurredAt)
       .first<OAuthStateRow>()
 
-    if (oauthState === null) {
+    if (
+      oauthState === null ||
+      !(await verifyHashedToken(
+        state,
+        oauthState.upstream_state_hash,
+        config.tokenHashSecret,
+        'oauth-upstream-state',
+      ))
+    ) {
       await recordAuditEvent(
         c,
         config.db,
@@ -218,7 +228,7 @@ export function createCallbackHandler(
           {
             success: false,
             provider: 'github',
-            reason: 'frozen_user',
+            reason: 'frozen_identity',
             userId: identity.user_id,
             clientId: oauthState.client_id,
             redirectUri: oauthState.redirect_uri,
@@ -298,4 +308,4 @@ export function createCallbackHandler(
   }
 }
 
-export const handleCallback = createCallbackHandler()
+export const handleCallbackGitHub = createCallbackHandler()
