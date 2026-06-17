@@ -31,12 +31,12 @@ describe('authentication token hashing', () => {
     const firstHash = await hashAuthToken(
       'token-value',
       'session-secret',
-      'session',
+      'oauth-state',
     )
     const secondHash = await hashAuthToken(
       'token-value',
       'session-secret',
-      'session',
+      'oauth-state',
     )
 
     expect(firstHash).toMatch(LOWERCASE_SHA256_HEX)
@@ -45,9 +45,9 @@ describe('authentication token hashing', () => {
 
   it('separates hashes by purpose', async () => {
     const hashes = await Promise.all([
-      hashAuthToken('token-value', 'session-secret', 'session'),
       hashAuthToken('token-value', 'session-secret', 'oauth-state'),
       hashAuthToken('token-value', 'session-secret', 'auth-code'),
+      hashAuthToken('other-value', 'session-secret', 'oauth-state'),
     ])
 
     expect(new Set(hashes).size).toBe(3)
@@ -57,17 +57,17 @@ describe('authentication token hashing', () => {
     const original = await hashAuthToken(
       'token-value',
       'session-secret',
-      'session',
+      'oauth-state',
     )
     const changedValue = await hashAuthToken(
       'other-token',
       'session-secret',
-      'session',
+      'oauth-state',
     )
     const changedSecret = await hashAuthToken(
       'token-value',
       'other-secret',
-      'session',
+      'oauth-state',
     )
 
     expect(changedValue).not.toBe(original)
@@ -76,7 +76,7 @@ describe('authentication token hashing', () => {
 
   it('rejects an empty HMAC secret', async () => {
     await expect(
-      hashAuthToken('token-value', '', 'session'),
+      hashAuthToken('token-value', '', 'oauth-state'),
     ).rejects.toThrow('HMAC secret must not be empty')
   })
 })

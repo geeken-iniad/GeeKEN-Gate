@@ -115,4 +115,14 @@ describe('unknown routes', () => {
 
     expect(response.status).toBe(404)
   })
+
+  it('returns not found for removed session routes', async () => {
+    const sessionResponse = await SELF.fetch('https://example.com/session')
+    const logoutResponse = await SELF.fetch('https://example.com/logout', {
+      method: 'POST',
+    })
+
+    expect(sessionResponse.status).toBe(404)
+    expect(logoutResponse.status).toBe(404)
+  })
 })
