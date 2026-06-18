@@ -79,14 +79,16 @@ function prepareAuditEvent(
   return database
     .prepare(
       `INSERT INTO auth_events
-         (event_type, provider, user_id, client_id, success, reason,
-          ip_address, user_agent, occurred_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (event_type, provider, user_id, google_issuer, google_sub, client_id,
+          success, reason, ip_address, user_agent, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       'token',
       event.provider,
       event.userId ?? null,
+      null,
+      null,
       event.clientId ?? null,
       event.success ? 1 : 0,
       event.reason ?? null,

@@ -212,6 +212,8 @@ CREATE TABLE auth_events (
   user_id TEXT,
   github_id TEXT,
   github_login TEXT,
+  google_issuer TEXT,
+  google_sub TEXT,
   client_id TEXT,
   redirect_uri TEXT,
   success INTEGER NOT NULL,
@@ -235,6 +237,9 @@ CREATE INDEX idx_auth_events_user_id_occurred_at
 
 CREATE INDEX idx_auth_events_github_id_occurred_at
   ON auth_events(github_id, occurred_at);
+
+CREATE INDEX idx_auth_events_google_sub_occurred_at
+  ON auth_events(google_sub, occurred_at);
 
 CREATE INDEX idx_auth_events_client_id_occurred_at
   ON auth_events(client_id, occurred_at);

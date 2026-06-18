@@ -9,6 +9,7 @@ const REQUIRED_ENVIRONMENT_VARIABLES = [
   'SMOKE_CLIENT_ID',
   'SMOKE_REDIRECT_URI',
 ]
+const SUPPORTED_PROVIDERS = new Set(['github', 'google'])
 
 function parseUrl(name, value) {
   try {
@@ -63,11 +64,18 @@ export function loadConfig(environment = process.env) {
     )
   }
 
+  const provider = environment.SMOKE_PROVIDER ?? 'github'
+
+  if (!SUPPORTED_PROVIDERS.has(provider)) {
+    throw new Error('SMOKE_PROVIDER must be "github" or "google"')
+  }
+
   return {
     gateBaseUrl: new URL(gateBaseUrl.href.replace(/\/+$/, '') + '/'),
     clientId: environment.SMOKE_CLIENT_ID,
     redirectUri: redirectUri.href,
     port,
+    provider,
   }
 }
 
@@ -161,7 +169,7 @@ export function buildAuthorizeUrl(config, pkce) {
   authorizeUrl.searchParams.set('nonce', pkce.nonce)
   authorizeUrl.searchParams.set('code_challenge', pkce.challenge)
   authorizeUrl.searchParams.set('code_challenge_method', 'S256')
-  authorizeUrl.searchParams.set('provider', 'github')
+  authorizeUrl.searchParams.set('provider', config.provider)
 
   return authorizeUrl.href
 }

@@ -112,6 +112,7 @@ describe('initial migration', () => {
         'idx_auth_events_event_type_occurred_at',
         'idx_auth_events_user_id_occurred_at',
         'idx_auth_events_github_id_occurred_at',
+        'idx_auth_events_google_sub_occurred_at',
         'idx_auth_events_client_id_occurred_at',
       ]),
     )

@@ -9,7 +9,13 @@ export const CLIENT_ID = 'client-a'
 export const REDIRECT_URI = 'https://client.example/callback'
 export const TOKEN_HASH_SECRET = 's'.repeat(32)
 export const GITHUB_CALLBACK_URL = 'https://auth.example.com/callback/github'
+export const GOOGLE_CALLBACK_URL = 'https://auth.example.com/callback/google'
 export const ISSUER = 'https://auth.example.com'
+export const GOOGLE_CLIENT_ID = 'google-client-id'
+export const GOOGLE_CLIENT_SECRET = 'google-client-secret'
+export const GOOGLE_ALLOWED_HD_DOMAINS = 'example.com,example.jp'
+export const EMAIL_HASH_PEPPER_V1 = 'pepper-v1-secret-32-bytes-long!!'
+export const CURRENT_EMAIL_HASH_PEPPER_VERSION = '1'
 export const GITHUB_ID = '123456'
 export const GITHUB_LOGIN = 'octocat'
 export const USER_ID = 'user-id-uuid'
@@ -34,6 +40,12 @@ export function createBindings(
     OIDC_SIGNING_PRIVATE_KEY: JSON.stringify(TEST_PRIVATE_JWK),
     OIDC_SIGNING_KEY_ID: TEST_KID,
     TOKEN_HASH_SECRET,
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_CALLBACK_URL,
+    GOOGLE_ALLOWED_HD_DOMAINS,
+    EMAIL_HASH_PEPPER_V1,
+    CURRENT_EMAIL_HASH_PEPPER_VERSION,
     ...overrides,
   }
 }

@@ -51,9 +51,10 @@ function prepareAuditEvent(
   return database
     .prepare(
       `INSERT INTO auth_events
-         (event_type, provider, user_id, github_id, github_login, client_id,
-          redirect_uri, success, reason, ip_address, user_agent, occurred_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (event_type, provider, user_id, github_id, github_login, google_issuer,
+          google_sub, client_id, redirect_uri, success, reason, ip_address,
+          user_agent, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       'callback',
@@ -61,6 +62,8 @@ function prepareAuditEvent(
       event.userId ?? null,
       event.user?.githubId ?? null,
       event.user?.githubLogin ?? null,
+      null,
+      null,
       event.clientId ?? null,
       event.redirectUri ?? null,
       event.success ? 1 : 0,
@@ -131,6 +134,7 @@ export function createCallbackHandler(
       .prepare(
         `DELETE FROM oauth_states
          WHERE upstream_state_hash = ?
+           AND provider = 'github'
            AND expires_at > ?
          RETURNING client_state, client_id, redirect_uri, nonce, code_challenge,
                   upstream_state_hash`,

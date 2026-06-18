@@ -13,6 +13,7 @@ const database = {
 } as unknown as D1Database
 const TOKEN_HASH_SECRET = 't'.repeat(32)
 const GITHUB_CALLBACK_URL = 'https://auth.example.com/callback/github'
+const GOOGLE_CALLBACK_URL = 'https://auth.example.com/callback/google'
 
 function createBindings(
   overrides: Partial<AppBindings> = {},
@@ -29,6 +30,12 @@ function createBindings(
     OIDC_SIGNING_PRIVATE_KEY: JSON.stringify(TEST_PRIVATE_JWK),
     OIDC_SIGNING_KEY_ID: TEST_KID,
     TOKEN_HASH_SECRET,
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
+    GOOGLE_CALLBACK_URL,
+    GOOGLE_ALLOWED_HD_DOMAINS: 'example.com,example.jp',
+    EMAIL_HASH_PEPPER_V1: 'pepper-v1-secret-32-bytes-long!!',
+    CURRENT_EMAIL_HASH_PEPPER_VERSION: '1',
     ...overrides,
   }
 }
@@ -49,6 +56,13 @@ describe('loadAuthServerConfig', () => {
       use: 'sig',
       kid: TEST_KID,
     })
+    expect(config.googleClientId).toBe('google-client-id')
+    expect(config.googleCallbackUrl.href).toBe(GOOGLE_CALLBACK_URL)
+    expect(config.googleAllowedHdDomains).toEqual(['example.com', 'example.jp'])
+    expect(config.emailHashPeppers.get(1)).toBe(
+      'pepper-v1-secret-32-bytes-long!!',
+    )
+    expect(config.currentEmailHashPepperVersion).toBe(1)
   })
 
   it.each([
@@ -60,6 +74,12 @@ describe('loadAuthServerConfig', () => {
     'OIDC_SIGNING_PRIVATE_KEY',
     'OIDC_SIGNING_KEY_ID',
     'TOKEN_HASH_SECRET',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_CALLBACK_URL',
+    'GOOGLE_ALLOWED_HD_DOMAINS',
+    'EMAIL_HASH_PEPPER_V1',
+    'CURRENT_EMAIL_HASH_PEPPER_VERSION',
   ] as const)('rejects a missing %s binding', async (name) => {
     const bindings = createBindings()
     delete bindings[name]
@@ -78,6 +98,12 @@ describe('loadAuthServerConfig', () => {
     'OIDC_SIGNING_PRIVATE_KEY',
     'OIDC_SIGNING_KEY_ID',
     'TOKEN_HASH_SECRET',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_CALLBACK_URL',
+    'GOOGLE_ALLOWED_HD_DOMAINS',
+    'EMAIL_HASH_PEPPER_V1',
+    'CURRENT_EMAIL_HASH_PEPPER_VERSION',
   ] as const)('rejects an empty %s binding', async (name) => {
     await expect(() =>
       loadAuthServerConfig(createBindings({ [name]: '   ' })),
@@ -98,6 +124,19 @@ describe('loadAuthServerConfig', () => {
   })
 
   it.each([
+    'not-a-url',
+    'ftp://auth.example.com/callback/google',
+    'http://auth.example.com/callback/google',
+    'http://localhost.evil.example/callback/google',
+  ])('rejects an invalid Google callback URL: %s', async (callbackUrl) => {
+    await expect(() =>
+      loadAuthServerConfig(
+        createBindings({ GOOGLE_CALLBACK_URL: callbackUrl }),
+      ),
+    ).rejects.toThrow('Invalid environment binding: GOOGLE_CALLBACK_URL')
+  })
+
+  it.each([
     'http://localhost:8787/callback/github',
     'http://127.0.0.1:8787/callback/github',
     'http://[::1]:8787/callback/github',
@@ -109,6 +148,20 @@ describe('loadAuthServerConfig', () => {
     )
 
     expect(config.githubCallbackUrl.href).toBe(callbackUrl)
+  })
+
+  it.each([
+    'http://localhost:8787/callback/google',
+    'http://127.0.0.1:8787/callback/google',
+    'http://[::1]:8787/callback/google',
+  ])('allows a loopback HTTP Google callback URL: %s', async (callbackUrl) => {
+    const config = await loadAuthServerConfig(
+      createBindings({
+        GOOGLE_CALLBACK_URL: callbackUrl,
+      }),
+    )
+
+    expect(config.googleCallbackUrl.href).toBe(callbackUrl)
   })
 
   it.each([
@@ -155,6 +208,53 @@ describe('loadAuthServerConfig', () => {
         createBindings({ OIDC_SIGNING_PRIVATE_KEY: JSON.stringify({ kty: 'oct' }) }),
       ),
     ).rejects.toThrow('Invalid environment binding: OIDC_SIGNING_PRIVATE_KEY')
+  })
+
+  it('rejects empty or invalid Google hosted domain lists', async () => {
+    await expect(
+      loadAuthServerConfig(
+        createBindings({ GOOGLE_ALLOWED_HD_DOMAINS: '  ,  ' }),
+      ),
+    ).rejects.toThrow('GOOGLE_ALLOWED_HD_DOMAINS')
+
+    const config = await loadAuthServerConfig(
+      createBindings({ GOOGLE_ALLOWED_HD_DOMAINS: 'Example.COM, example.jp' }),
+    )
+
+    expect(config.googleAllowedHdDomains).toEqual(['example.com', 'example.jp'])
+  })
+
+  it('rejects an invalid current email pepper version', async () => {
+    await expect(
+      loadAuthServerConfig(
+        createBindings({ CURRENT_EMAIL_HASH_PEPPER_VERSION: 'not-a-number' }),
+      ),
+    ).rejects.toThrow('CURRENT_EMAIL_HASH_PEPPER_VERSION')
+
+    await expect(
+      loadAuthServerConfig(
+        createBindings({ CURRENT_EMAIL_HASH_PEPPER_VERSION: '2' }),
+      ),
+    ).rejects.toThrow(
+      'Missing or empty environment binding: EMAIL_HASH_PEPPER_V2',
+    )
+  })
+
+  it('collects multiple configured email hash peppers', async () => {
+    const config = await loadAuthServerConfig(
+      createBindings({
+        EMAIL_HASH_PEPPER_V2: 'pepper-v2-secret-32-bytes-long!',
+        CURRENT_EMAIL_HASH_PEPPER_VERSION: '2',
+      }),
+    )
+
+    expect(config.emailHashPeppers.get(1)).toBe(
+      'pepper-v1-secret-32-bytes-long!!',
+    )
+    expect(config.emailHashPeppers.get(2)).toBe(
+      'pepper-v2-secret-32-bytes-long!',
+    )
+    expect(config.currentEmailHashPepperVersion).toBe(2)
   })
 
   it.each([undefined, null, {}, { prepare() {} }])(

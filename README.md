@@ -1,7 +1,7 @@
 # GeeKEN Gate
 
 Cloudflare Workers、Hono、D1 ベースの最小 OIDC Provider です。
-GitHub Organization の active member を認証し、標準的な OIDC Authorization Code Flow + PKCE で client に ID Token、access token、refresh token を発行します。
+GitHub Organization の active member、または手動 allowlist に登録された Google Workspace ユーザーを認証し、標準的な OIDC Authorization Code Flow + PKCE で client に ID Token、access token、refresh token を発行します。
 
 ## Requirements
 
@@ -10,6 +10,7 @@ GitHub Organization の active member を認証し、標準的な OIDC Authoriza
 - Cloudflare アカウントと Wrangler ログイン
 - 試験または運用対象の GitHub Organization
 - GitHub OAuth App
+- Google OAuth 2.0 credentials（Google login を利用する場合）
 
 ## Local Setup
 
@@ -27,13 +28,19 @@ GITHUB_CLIENT_ID=<GitHub OAuth App client ID>
 GITHUB_CLIENT_SECRET=<GitHub OAuth App client secret>
 GITHUB_ORG=<Organization login>
 GITHUB_CALLBACK_URL=http://127.0.0.1:8787/callback/github
+GOOGLE_CLIENT_ID=<Google OAuth client ID>
+GOOGLE_CLIENT_SECRET=<Google OAuth client secret>
+GOOGLE_CALLBACK_URL=http://127.0.0.1:8787/callback/google
+GOOGLE_ALLOWED_HD_DOMAINS=example.com,example.jp
+EMAIL_HASH_PEPPER_V1=<32+ byte random secret>
+CURRENT_EMAIL_HASH_PEPPER_VERSION=1
 OIDC_ISSUER=http://127.0.0.1:8787
 OIDC_SIGNING_PRIVATE_KEY=<RSA private JWK JSON for RS256>
 OIDC_SIGNING_KEY_ID=<kid>
 TOKEN_HASH_SECRET=<32 bytes or longer random secret for token hashes>
 ```
 
-`OIDC_SIGNING_PRIVATE_KEY` は RS256 署名用の RSA private JWK JSON です。`TOKEN_HASH_SECRET` は state/code/token の HMAC 保存に使用します。session cookie 用ではありません。
+`OIDC_SIGNING_PRIVATE_KEY` は RS256 署名用の RSA private JWK JSON です。`TOKEN_HASH_SECRET` は state/code/token の HMAC 保存に使用します。`EMAIL_HASH_PEPPER_V1` は Google allowlist 用 email の HMAC に使用します。いずれも session cookie 用ではありません。
 
 GitHub OAuth App には次を設定します。
 
@@ -53,7 +60,7 @@ pnpm dev
 - `GET /jwks.json`
 - `GET /authorize`
 - `GET /callback/github`
-- `GET /callback/google`（Phase 4 で実装予定）
+- `GET /callback/google`
 - `POST /token`
 - `GET /userinfo`
 - `POST /userinfo`
@@ -92,7 +99,7 @@ pnpm exec wrangler d1 execute DB --remote --command \
 http://127.0.0.1:8787/authorize?client_id=my-client&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&response_type=code&scope=openid&state=<state>&nonce=<nonce>&code_challenge=<challenge>&code_challenge_method=S256&provider=github
 ```
 
-`provider` を省略した場合、GitHub と Google を選択できる最小の 2 ボタン画面を表示します。Google login は Phase 4 で実装予定であり、現時点では「利用不可」の画面を返します。
+`provider` を省略した場合、GitHub と Google を選択できる最小の 2 ボタン画面を表示します。Google ボタンは `openid email` scope で Google 認可を開始します。
 
 GitHub 認証成功後、登録済み redirect URI に 2 分間有効な `code` と元の client `state` が付与されます。クライアントはその code を `/token` で交換します。
 
@@ -162,7 +169,10 @@ GATE_BASE_URL=https://geeken-gate.example.workers.dev
 SMOKE_CLIENT_ID=smoke-client
 SMOKE_REDIRECT_URI=http://localhost:3000/callback
 SMOKE_PORT=3000
+SMOKE_PROVIDER=github
 ```
+
+`SMOKE_PROVIDER` は `github`（デフォルト）または `google` を指定できます。Google を試す場合は事前に allowlist 登録が必要です。
 
 環境変数を読み込んで smoke client を起動します。
 
@@ -198,6 +208,28 @@ pnpm exec wrangler d1 execute DB --remote --command \
 
 ローカル D1 では `--remote` を `--local` へ変更します。
 
+## Google Login and Allowlist
+
+Google login は、手動 allowlist に登録された検証済み Google Workspace メールのユーザーを許可する補助経路です。Google OAuth App は Gate 公開 URL の `/callback/google` を authorized redirect URI として登録してください。Google Cloud console 側では `openid` と `email` scope を要求できるように設定します。
+
+許可するメールアドレスを allowlist に登録します。平文 email は保存されず、HMAC 化された `email_hash` と `pepper_version`、紐付く `user_id` のみが保存されます。
+
+```bash
+pnpm google:allow -- --local --email user@example.com
+```
+
+既存の GitHub identity と同じ `users.id` に紐付けたい場合は `--github-id` を指定します。該当 GitHub identity が存在しなければ、空の `github_login` を持つ新規 GitHub identity が作成されます。
+
+```bash
+pnpm google:allow -- --local --email user@example.com --github-id 123456
+```
+
+リモート D1 へ登録する場合は `--remote` を指定します。
+
+`GOOGLE_ALLOWED_HD_DOMAINS` はカンマ区切りで許可する `hd`（hosted domain）を指定します。Google ID Token の `email_verified` が `true` で、`hd` が一致し、allowlist に存在しかつ無効化されていない場合のみログインを許可します。
+
+`EMAIL_HASH_PEPPER_V1` は Cloudflare secrets として管理し、リポジトリや vars には平文保存しないでください。pepper rotation 時は `EMAIL_HASH_PEPPER_V2` 等を追加し、`CURRENT_EMAIL_HASH_PEPPER_VERSION` を更新します。allowlist 照合時は DB に存在する `pepper_version` に対応する pepper で HMAC を計算し、登録時は現在のバージョンを使用します。
+
 ## Cloudflare Deployment
 
 D1 database を作成し、表示された database ID を `wrangler.jsonc` の `database_id` へ設定します。
@@ -215,13 +247,19 @@ pnpm exec wrangler secret put GITHUB_CLIENT_ID
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET
 pnpm exec wrangler secret put GITHUB_ORG
 pnpm exec wrangler secret put GITHUB_CALLBACK_URL
+pnpm exec wrangler secret put GOOGLE_CLIENT_ID
+pnpm exec wrangler secret put GOOGLE_CLIENT_SECRET
+pnpm exec wrangler secret put GOOGLE_CALLBACK_URL
+pnpm exec wrangler secret put GOOGLE_ALLOWED_HD_DOMAINS
+pnpm exec wrangler secret put EMAIL_HASH_PEPPER_V1
+pnpm exec wrangler secret put CURRENT_EMAIL_HASH_PEPPER_VERSION
 pnpm exec wrangler secret put OIDC_ISSUER
 pnpm exec wrangler secret put OIDC_SIGNING_PRIVATE_KEY
 pnpm exec wrangler secret put OIDC_SIGNING_KEY_ID
 pnpm exec wrangler secret put TOKEN_HASH_SECRET
 ```
 
-GitHub OAuth App の callback URL を公開 Worker の `/callback/github` へ設定します。
+GitHub OAuth App の callback URL を公開 Worker の `/callback/github`、Google OAuth credentials の authorized redirect URI を `/callback/google` へ設定します。
 
 ### GitHub Actions CI/CD
 
@@ -258,6 +296,12 @@ Worker runtime secrets は Cloudflare 側に次を登録済みにしてくださ
 - `GITHUB_CLIENT_SECRET`
 - `GITHUB_ORG`
 - `GITHUB_CALLBACK_URL`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_CALLBACK_URL`
+- `GOOGLE_ALLOWED_HD_DOMAINS`
+- `EMAIL_HASH_PEPPER_V1`
+- `CURRENT_EMAIL_HASH_PEPPER_VERSION`
 - `OIDC_ISSUER`
 - `OIDC_SIGNING_PRIVATE_KEY`
 - `OIDC_SIGNING_KEY_ID`
@@ -306,12 +350,14 @@ pnpm check
 3. code が一度だけ交換できる
 4. refresh token grant が動作し、元の refresh token が継続利用可能
 5. `/userinfo` が `sub` のみを返す
-6. D1 に GitHub token、平文 state、code、token、client secret が存在しない
+6. D1 に GitHub token、平文 state、code、token、client secret、平文 email が存在しない。Google allowlist 用 email HMAC は `google_login_allowlist.email_hash` に保存される
 
 ## Security Notes
 
-- GitHub access token は callback 処理中のローカル変数だけで扱います。
+- GitHub / Google access token は callback 処理中のローカル変数だけで扱います。
 - OAuth state、認証 code、access token、refresh token は用途別 HMAC-SHA-256 だけを保存します。
+- Google allowlist 用 email は `email_hash`（HMAC-SHA-256）と `pepper_version` のみを保存し、平文 email や email hash をログやレスポンスに出力しません。
+- email HMAC pepper は Cloudflare secrets として管理し、リポジトリや Wrangler vars には平文保存しません。
 - client secret は生成・保存しません。public client + PKCE を使用します。
 - redirect URI は client ごとの登録値と完全一致で検証します。
 - ID Token は RS256 で署名します。秘密鍵は Cloudflare secrets として管理します。
@@ -319,17 +365,14 @@ pnpm check
 - CORS は公開していません。
 - SPA 側の XSS 対策、token 保存方針、CSP 等は client 側責務とします。
 
-## Phase 2 Scope Notes
+## Scope Notes
 
-このフェーズでは以下を実装しています。
+この実装では以下をカバーしています。
 
 - OIDC discovery / JWKS / `/authorize` / `/token` / `/userinfo`
-- GitHub を唯一の上流 IdP とする Authorization Code Flow + PKCE
+- GitHub / Google を上流 IdP とする Authorization Code Flow + PKCE
 - RS256 ID Token、opaque access token / refresh token
 - public client（client secret なし）
-- 新スキーマ（内部 `users.id`、`github_identities`、token テーブル等）
-
-以下は後続フェーズで対応します。
-
-- Google login の実装
-- Google allowlist CLI
+- 新スキーマ（内部 `users.id`、`github_identities`、`google_identities`、`google_login_allowlist`、token テーブル等）
+- Google ID Token 検証、`hd` 制限、HMAC email allowlist、identity collision 防止
+- `pnpm google:allow` allowlist 登録 CLI

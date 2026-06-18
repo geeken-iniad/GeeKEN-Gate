@@ -8,6 +8,7 @@ export type AuthTokenPurpose =
   | 'auth-code'
   | 'access-token'
   | 'refresh-token'
+  | 'email-allowlist'
 
 type TimingSafeSubtleCrypto = SubtleCrypto & {
   timingSafeEqual(
@@ -108,4 +109,19 @@ export async function verifyHashedToken(
 
   const subtleCrypto = crypto.subtle as TimingSafeSubtleCrypto
   return subtleCrypto.timingSafeEqual(actualBytes, expectedBytes)
+}
+
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase()
+}
+
+export async function hashEmailAddress(
+  email: string,
+  pepper: string,
+): Promise<string> {
+  if (pepper.length === 0) {
+    throw new Error('Email HMAC pepper must not be empty')
+  }
+
+  return hashAuthToken(email, pepper, 'email-allowlist')
 }
