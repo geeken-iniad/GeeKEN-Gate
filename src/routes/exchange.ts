@@ -3,6 +3,7 @@ import type { Context } from 'hono'
 import type { AppBindings } from '../lib/config'
 import { loadAuthServerConfig } from '../lib/config'
 import { hashAuthToken, verifyClientSecret } from '../lib/crypto'
+import { HTTP_STATUS } from '../lib/http-status'
 import { enforceRateLimit, getClientIp } from '../lib/rate-limit'
 
 const BASIC_AUTH_PATTERN = /^Basic ([A-Za-z0-9+/]+={0,2})$/i
@@ -36,6 +37,11 @@ interface AuditEvent {
   redirectUri?: string
   user?: UserRow
 }
+
+type ExchangeErrorStatus =
+  | typeof HTTP_STATUS.BAD_REQUEST
+  | typeof HTTP_STATUS.UNAUTHORIZED
+  | typeof HTTP_STATUS.FORBIDDEN
 
 function parseBasicCredentials(
   authorization: string | undefined,
@@ -106,11 +112,11 @@ async function recordAuditEvent(
 function jsonError(
   c: AppContext,
   error: 'invalid_client' | 'invalid_request' | 'invalid_grant' | 'access_denied',
-  status: 400 | 401 | 403,
+  status: ExchangeErrorStatus,
 ): Response {
   c.header('Cache-Control', 'no-store')
 
-  if (status === 401) {
+  if (status === HTTP_STATUS.UNAUTHORIZED) {
     c.header('WWW-Authenticate', 'Basic realm="exchange"')
   }
 
@@ -141,7 +147,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
       occurredAt,
     )
 
-    return jsonError(c, 'invalid_client', 401)
+    return jsonError(c, 'invalid_client', HTTP_STATUS.UNAUTHORIZED)
   }
 
   const client = await config.db
@@ -171,7 +177,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
       occurredAt,
     )
 
-    return jsonError(c, 'invalid_client', 401)
+    return jsonError(c, 'invalid_client', HTTP_STATUS.UNAUTHORIZED)
   }
 
   const clientRateLimitResponse = await enforceRateLimit(
@@ -204,7 +210,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
       occurredAt,
     )
 
-    return jsonError(c, 'invalid_request', 400)
+    return jsonError(c, 'invalid_request', HTTP_STATUS.BAD_REQUEST)
   }
 
   let form: FormData
@@ -223,7 +229,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
       occurredAt,
     )
 
-    return jsonError(c, 'invalid_request', 400)
+    return jsonError(c, 'invalid_request', HTTP_STATUS.BAD_REQUEST)
   }
 
   const codes = form.getAll('code')
@@ -254,7 +260,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
       occurredAt,
     )
 
-    return jsonError(c, 'invalid_request', 400)
+    return jsonError(c, 'invalid_request', HTTP_STATUS.BAD_REQUEST)
   }
 
   const codeHash = await hashAuthToken(
@@ -293,7 +299,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
       occurredAt,
     )
 
-    return jsonError(c, 'invalid_grant', 400)
+    return jsonError(c, 'invalid_grant', HTTP_STATUS.BAD_REQUEST)
   }
 
   const user = await config.db
@@ -324,7 +330,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
       occurredAt,
     )
 
-    return jsonError(c, 'invalid_grant', 400)
+    return jsonError(c, 'invalid_grant', HTTP_STATUS.BAD_REQUEST)
   }
 
   if (user.frozen !== 0) {
@@ -341,7 +347,7 @@ export async function handleExchange(c: AppContext): Promise<Response> {
       occurredAt,
     )
 
-    return jsonError(c, 'access_denied', 403)
+    return jsonError(c, 'access_denied', HTTP_STATUS.FORBIDDEN)
   }
 
   await recordAuditEvent(

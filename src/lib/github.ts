@@ -1,3 +1,5 @@
+import { HTTP_STATUS } from './http-status'
+
 export interface GitHubAuthOptions {
   clientId: string
   clientSecret: string
@@ -165,7 +167,7 @@ export async function authenticateGitHubUser(
     throw new GitHubAuthError('membership_fetch_failed', { cause })
   }
 
-  if (membershipResponse.status === 404) {
+  if (membershipResponse.status === HTTP_STATUS.NOT_FOUND) {
     throw new GitHubAuthError('membership_not_active')
   }
 
