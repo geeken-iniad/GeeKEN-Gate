@@ -9,6 +9,7 @@ import {
   GitHubAuthError,
   type GitHubAuthenticatedUser,
 } from '../lib/github'
+import { HTTP_STATUS } from '../lib/http-status'
 
 const SESSION_COOKIE_NAME = 'giken_session'
 const SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60
@@ -80,7 +81,7 @@ function redirectWithError(redirectUri: string): Response {
   location.searchParams.set('error', 'access_denied')
 
   return new Response(null, {
-    status: 302,
+    status: HTTP_STATUS.FOUND,
     headers: {
       'Cache-Control': 'no-store',
       Location: location.href,
@@ -106,7 +107,7 @@ export function createCallbackHandler(
       )
 
       c.header('Cache-Control', 'no-store')
-      return c.json({ error: 'invalid_request' }, 400)
+      return c.json({ error: 'invalid_request' }, HTTP_STATUS.BAD_REQUEST)
     }
 
     const stateHash = await hashAuthToken(
@@ -133,7 +134,7 @@ export function createCallbackHandler(
       )
 
       c.header('Cache-Control', 'no-store')
-      return c.json({ error: 'invalid_request' }, 400)
+      return c.json({ error: 'invalid_request' }, HTTP_STATUS.BAD_REQUEST)
     }
 
     let user: GitHubAuthenticatedUser

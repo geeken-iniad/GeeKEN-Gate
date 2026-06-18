@@ -3,6 +3,7 @@ import type { Context } from 'hono'
 import type { AppBindings } from '../lib/config'
 import { loadAuthServerConfig } from '../lib/config'
 import { generateRandomToken, hashAuthToken } from '../lib/crypto'
+import { HTTP_STATUS } from '../lib/http-status'
 import { enforceRateLimit, getClientIp } from '../lib/rate-limit'
 
 const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize'
@@ -48,7 +49,7 @@ export async function handleLogin(c: AppContext): Promise<Response> {
   const redirectUri = c.req.query('redirect_uri')
 
   if (!clientId || !redirectUri) {
-    return c.json({ error: 'invalid_request' }, 400)
+    return c.json({ error: 'invalid_request' }, HTTP_STATUS.BAD_REQUEST)
   }
 
   const config = loadAuthServerConfig(c.env)
@@ -59,7 +60,7 @@ export async function handleLogin(c: AppContext): Promise<Response> {
   )
 
   if (!isAllowed) {
-    return c.json({ error: 'invalid_request' }, 400)
+    return c.json({ error: 'invalid_request' }, HTTP_STATUS.BAD_REQUEST)
   }
 
   const state = generateRandomToken()

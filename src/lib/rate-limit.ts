@@ -1,6 +1,7 @@
 import type { Context } from 'hono'
 
 import type { AppBindings } from './config'
+import { HTTP_STATUS } from './http-status'
 
 type AppContext = Context<{ Bindings: AppBindings }>
 
@@ -56,5 +57,5 @@ export async function enforceRateLimit(
   c.header('Cache-Control', 'no-store')
   c.header('Retry-After', '60')
 
-  return c.json({ error: 'rate_limited' }, 429)
+  return c.json({ error: 'rate_limited' }, HTTP_STATUS.TOO_MANY_REQUESTS)
 }

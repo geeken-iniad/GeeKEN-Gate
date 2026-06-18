@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 
 import { cleanupExpiredAuthData } from './lib/cleanup'
 import type { AppBindings } from './lib/config'
+import { HTTP_STATUS } from './lib/http-status'
 import { enforceRateLimit } from './lib/rate-limit'
 import { handleCallback } from './routes/callback'
 import { handleExchange } from './routes/exchange'
@@ -33,7 +34,7 @@ app.get('/health', async (c) => {
 
     return c.json({ status: 'ok' })
   } catch {
-    return c.json({ status: 'error' }, 503)
+    return c.json({ status: 'error' }, HTTP_STATUS.SERVICE_UNAVAILABLE)
   }
 })
 
