@@ -4,6 +4,7 @@ import { deleteCookie, getCookie } from 'hono/cookie'
 import type { AppBindings } from '../lib/config'
 import { loadAuthServerConfig } from '../lib/config'
 import { hashAuthToken } from '../lib/crypto'
+import { HTTP_STATUS } from '../lib/http-status'
 
 const SESSION_COOKIE_NAME = 'giken_session'
 
@@ -14,6 +15,10 @@ interface SessionUserRow {
   github_login: string
   frozen: number
 }
+
+type SessionErrorStatus =
+  | typeof HTTP_STATUS.UNAUTHORIZED
+  | typeof HTTP_STATUS.FORBIDDEN
 
 function expireSessionCookie(c: AppContext): void {
   deleteCookie(c, SESSION_COOKIE_NAME, {
@@ -27,7 +32,7 @@ function expireSessionCookie(c: AppContext): void {
 function sessionError(
   c: AppContext,
   error: 'unauthorized' | 'access_denied',
-  status: 401 | 403,
+  status: SessionErrorStatus,
 ): Response {
   c.header('Cache-Control', 'no-store')
 
@@ -38,7 +43,7 @@ export async function handleSession(c: AppContext): Promise<Response> {
   const session = getCookie(c, SESSION_COOKIE_NAME)
 
   if (!session) {
-    return sessionError(c, 'unauthorized', 401)
+    return sessionError(c, 'unauthorized', HTTP_STATUS.UNAUTHORIZED)
   }
 
   const config = loadAuthServerConfig(c.env)
@@ -68,12 +73,12 @@ export async function handleSession(c: AppContext): Promise<Response> {
 
   if (user === null) {
     expireSessionCookie(c)
-    return sessionError(c, 'unauthorized', 401)
+    return sessionError(c, 'unauthorized', HTTP_STATUS.UNAUTHORIZED)
   }
 
   if (user.frozen !== 0) {
     expireSessionCookie(c)
-    return sessionError(c, 'access_denied', 403)
+    return sessionError(c, 'access_denied', HTTP_STATUS.FORBIDDEN)
   }
 
   c.header('Cache-Control', 'no-store')
@@ -107,5 +112,5 @@ export async function handleLogout(c: AppContext): Promise<Response> {
   expireSessionCookie(c)
   c.header('Cache-Control', 'no-store')
 
-  return c.body(null, 204)
+  return c.body(null, HTTP_STATUS.NO_CONTENT)
 }
