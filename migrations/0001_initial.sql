@@ -41,27 +41,6 @@ CREATE TABLE allowed_redirect_uris (
   CHECK (length(redirect_uri) > 0)
 ) STRICT;
 
-CREATE TABLE sessions (
-  session_hash TEXT PRIMARY KEY,
-  github_id TEXT NOT NULL,
-  created_at INTEGER NOT NULL CHECK (created_at > 0),
-  expires_at INTEGER NOT NULL,
-  FOREIGN KEY (github_id)
-    REFERENCES users(github_id)
-    ON DELETE CASCADE,
-  CHECK (
-    length(session_hash) = 64
-    AND session_hash NOT GLOB '*[^0-9a-f]*'
-  ),
-  CHECK (expires_at > created_at)
-) STRICT;
-
-CREATE INDEX idx_sessions_github_id
-  ON sessions(github_id);
-
-CREATE INDEX idx_sessions_expires_at
-  ON sessions(expires_at);
-
 CREATE TABLE oauth_states (
   state_hash TEXT PRIMARY KEY,
   client_id TEXT NOT NULL,

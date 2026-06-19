@@ -9,12 +9,6 @@ export async function cleanupExpiredAuthData(
   await database.batch([
     database
       .prepare(
-        `DELETE FROM sessions
-         WHERE expires_at <= ?`,
-      )
-      .bind(currentTime),
-    database
-      .prepare(
         `DELETE FROM oauth_states
          WHERE expires_at <= ?`,
       )

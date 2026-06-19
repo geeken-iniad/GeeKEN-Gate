@@ -36,21 +36,6 @@ async function insertCleanupFixtures(): Promise<void> {
 
   await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO sessions
-         (session_hash, github_id, created_at, expires_at)
-       VALUES (?, ?, ?, ?)`,
-    ).bind(HASH_A, '100', CURRENT_TIME - 100, CURRENT_TIME - 1),
-    env.DB.prepare(
-      `INSERT INTO sessions
-         (session_hash, github_id, created_at, expires_at)
-       VALUES (?, ?, ?, ?)`,
-    ).bind(HASH_B, '100', CURRENT_TIME - 100, CURRENT_TIME),
-    env.DB.prepare(
-      `INSERT INTO sessions
-         (session_hash, github_id, created_at, expires_at)
-       VALUES (?, ?, ?, ?)`,
-    ).bind(HASH_C, '100', CURRENT_TIME - 100, CURRENT_TIME + 1),
-    env.DB.prepare(
       `INSERT INTO oauth_states
          (state_hash, client_id, redirect_uri, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?)`,
@@ -161,9 +146,6 @@ describe('cleanupExpiredAuthData', () => {
   it('deletes expired credentials and audit events older than 60 days', async () => {
     await cleanupExpiredAuthData(env.DB, CURRENT_TIME)
 
-    await expect(getHashes('sessions', 'session_hash')).resolves.toEqual([
-      HASH_C,
-    ])
     await expect(getHashes('oauth_states', 'state_hash')).resolves.toEqual([
       HASH_C,
     ])
@@ -177,9 +159,6 @@ describe('cleanupExpiredAuthData', () => {
     await cleanupExpiredAuthData(env.DB, CURRENT_TIME)
     await cleanupExpiredAuthData(env.DB, CURRENT_TIME)
 
-    await expect(getHashes('sessions', 'session_hash')).resolves.toEqual([
-      HASH_C,
-    ])
     await expect(getEventTypes()).resolves.toEqual(['boundary', 'recent'])
   })
 })
@@ -195,7 +174,10 @@ describe('scheduled cleanup handler', () => {
 
     await scheduled(controller, env, executionContext)
 
-    await expect(getHashes('sessions', 'session_hash')).resolves.toEqual([
+    await expect(getHashes('oauth_states', 'state_hash')).resolves.toEqual([
+      HASH_C,
+    ])
+    await expect(getHashes('auth_codes', 'code_hash')).resolves.toEqual([
       HASH_C,
     ])
     await expect(getEventTypes()).resolves.toEqual(['boundary', 'recent'])

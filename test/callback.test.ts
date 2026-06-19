@@ -156,15 +156,7 @@ describe('GET /callback', () => {
     )
     expect(location.searchParams.get('source')).toBe('login')
     expect(authCode).toMatch(/^[A-Za-z0-9_-]{43}$/)
-
-    const setCookie = response.headers.get('set-cookie') ?? ''
-    const session = /^giken_session=([^;]+)/.exec(setCookie)?.[1]
-    expect(session).toMatch(/^[A-Za-z0-9_-]{43}$/)
-    expect(setCookie).toContain('Max-Age=604800')
-    expect(setCookie).toContain('Path=/')
-    expect(setCookie).toContain('HttpOnly')
-    expect(setCookie).toContain('Secure')
-    expect(setCookie).toContain('SameSite=Lax')
+    expect(response.headers.get('set-cookie')).toBeNull()
 
     const user = await env.DB.prepare(
       `SELECT github_id, github_login, created_at, updated_at
@@ -183,26 +175,14 @@ describe('GET /callback', () => {
     expect(user?.created_at).toBeLessThanOrEqual(afterRequest)
     expect(user?.updated_at).toBe(user?.created_at)
 
-    const storedSession = await env.DB.prepare(
-      `SELECT session_hash AS hash, created_at, expires_at
-       FROM sessions`,
-    ).first<StoredCredential>()
     const storedCode = await env.DB.prepare(
       `SELECT code_hash AS hash, created_at, expires_at
        FROM auth_codes`,
     ).first<StoredCredential>()
 
-    expect(storedSession).not.toBeNull()
     expect(storedCode).not.toBeNull()
-    expect(storedSession!.expires_at - storedSession!.created_at).toBe(
-      7 * 24 * 60 * 60,
-    )
     expect(storedCode!.expires_at - storedCode!.created_at).toBe(2 * 60)
-    expect(storedSession!.hash).not.toBe(session)
     expect(storedCode!.hash).not.toBe(authCode)
-    await expect(
-      hashAuthToken(session ?? '', SESSION_SECRET, 'session'),
-    ).resolves.toBe(storedSession!.hash)
     await expect(
       hashAuthToken(authCode ?? '', SESSION_SECRET, 'auth-code'),
     ).resolves.toBe(storedCode!.hash)
@@ -263,7 +243,6 @@ describe('GET /callback', () => {
       error: 'invalid_request',
     })
     expect(authenticate).toHaveBeenCalledTimes(1)
-    expect(await countRows('sessions')).toBe(1)
     expect(await countRows('auth_codes')).toBe(1)
 
     const events = await getAuthEvents()
@@ -289,7 +268,6 @@ describe('GET /callback', () => {
       error: 'invalid_request',
     })
     expect(authenticate).not.toHaveBeenCalled()
-    expect(await countRows('sessions')).toBe(0)
     expect(await countRows('auth_codes')).toBe(0)
   })
 
@@ -330,7 +308,6 @@ describe('GET /callback', () => {
     expect(response.headers.get('set-cookie')).toBeNull()
     expect(await countRows('oauth_states')).toBe(0)
     expect(await countRows('users')).toBe(0)
-    expect(await countRows('sessions')).toBe(0)
     expect(await countRows('auth_codes')).toBe(0)
     await expect(getAuthEvents()).resolves.toEqual([
       expect.objectContaining({
@@ -358,7 +335,6 @@ describe('GET /callback', () => {
       new URL(response.headers.get('location') ?? '').searchParams.get('error'),
     ).toBe('access_denied')
     expect(await countRows('users')).toBe(0)
-    expect(await countRows('sessions')).toBe(0)
     expect(await countRows('auth_codes')).toBe(0)
     await expect(getAuthEvents()).resolves.toEqual([
       expect.objectContaining({
