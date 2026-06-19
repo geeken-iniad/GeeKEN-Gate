@@ -27,15 +27,11 @@ GITHUB_CLIENT_ID=<GitHub OAuth App client ID>
 GITHUB_CLIENT_SECRET=<GitHub OAuth App client secret>
 GITHUB_ORG=<Organization login>
 GITHUB_CALLBACK_URL=http://127.0.0.1:8787/callback
-SESSION_SECRET=<32バイト以上のランダム値>
+SESSION_SECRET=<32 bytes or longer random secret for state/code HMAC>
 ```
 
-`SESSION_SECRET`はUTF-8で32バイト以上を必須とし、短い値は設定読み込み時に
-拒否します。次のコマンドで32バイトのランダム値を生成できます。
-
-```bash
-openssl rand -hex 32
-```
+`SESSION_SECRET`は現在のOAuth stateと認証codeのHMAC保存に使用します。session
+cookie用ではありません。
 
 GitHub OAuth Appには次を設定します。
 
@@ -158,20 +154,9 @@ GitHub認証後、結果画面で以下を確認します。
 redirect URIも同じ値へ変更してください。登録済みredirect URIとは完全一致が
 必要です。
 
-## Session And Logout
-
-GitHub callback成功時、認証サーバーは7日間有効な`giken_session` Cookieを
-設定します。
-
-- `GET /session`: 現在のGitHub userを返す
-- `POST /logout`: 認証サーバーのsessionを削除してCookieを失効する
-
-Cookieは`HttpOnly; Secure; SameSite=Lax; Path=/`です。クライアントアプリ自身の
-sessionは、クライアント側で別途作成・削除してください。
-
 ## User Freeze
 
-GitHub IDを凍結すると、callback、code交換、session照会が拒否されます。
+GitHub IDを凍結すると、callback、code交換が拒否されます。
 
 ```bash
 pnpm exec wrangler d1 execute DB --remote --command \
@@ -198,7 +183,7 @@ D1 databaseを作成し、表示されたdatabase IDを`wrangler.jsonc`の
 
 ```bash
 pnpm exec wrangler login
-pnpm exec wrangler d1 create geeken-gate
+pnpm exec wrangler d1 create geeken-gate-db
 pnpm db:migrate:remote
 ```
 
@@ -271,7 +256,7 @@ Actions logsでvalidation、remote D1 migrations、`wrangler deploy`、health ch
 curl --fail --silent --show-error "https://geeken-gate.example.workers.dev/health"
 ```
 
-Cronは毎日UTC 03:00に実行され、期限切れsession、OAuth state、認証codeと、
+Cronは毎日UTC 03:00に実行され、期限切れOAuth state、認証codeと、
 60日を超えた監査ログを削除します。
 
 ## Rate Limiting
@@ -305,13 +290,12 @@ pnpm check
 1. Organizationのactive memberがログインできる
 2. 非所属・pending・凍結userが拒否される
 3. codeが一度だけ交換できる
-4. `/session`がuserを返し、`/logout`後は401になる
-5. D1にGitHub token、平文session、state、code、client secretが存在しない
+4. D1にGitHub token、平文state、code、client secretが存在しない
 
 ## Security Notes
 
 - GitHub access tokenはcallback処理中のローカル変数だけで扱います。
-- session、OAuth state、認証codeは用途別HMAC-SHA-256だけを保存します。
+- OAuth state、認証codeは用途別HMAC-SHA-256だけを保存します。
 - client secretはSHA-256 hashだけを保存し、timing-safeに比較します。
 - redirect URIはclientごとの登録値と完全一致で検証します。
 - CORSは公開していません。

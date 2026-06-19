@@ -2,7 +2,7 @@ const TOKEN_BYTE_LENGTH = 32
 const SHA256_BYTE_LENGTH = 32
 const textEncoder = new TextEncoder()
 
-export type AuthTokenPurpose = 'session' | 'oauth-state' | 'auth-code'
+export type AuthTokenPurpose = 'oauth-state' | 'auth-code'
 
 type TimingSafeSubtleCrypto = SubtleCrypto & {
   timingSafeEqual(

@@ -1,5 +1,4 @@
 import type { Context, Handler } from 'hono'
-import { setCookie } from 'hono/cookie'
 
 import type { AppBindings } from '../lib/config'
 import { loadAuthServerConfig } from '../lib/config'
@@ -10,8 +9,6 @@ import {
   type GitHubAuthenticatedUser,
 } from '../lib/github'
 
-const SESSION_COOKIE_NAME = 'giken_session'
-const SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60
 const AUTH_CODE_LIFETIME_SECONDS = 2 * 60
 
 type AppContext = Context<{ Bindings: AppBindings }>
@@ -191,12 +188,12 @@ export function createCallbackHandler(
       return redirectWithError(oauthState.redirect_uri)
     }
 
-    const session = generateRandomToken()
     const authCode = generateRandomToken()
-    const [sessionHash, authCodeHash] = await Promise.all([
-      hashAuthToken(session, config.sessionSecret, 'session'),
-      hashAuthToken(authCode, config.sessionSecret, 'auth-code'),
-    ])
+    const authCodeHash = await hashAuthToken(
+      authCode,
+      config.sessionSecret,
+      'auth-code',
+    )
 
     await config.db.batch([
       config.db
@@ -209,18 +206,6 @@ export function createCallbackHandler(
              updated_at = excluded.updated_at`,
         )
         .bind(user.githubId, user.githubLogin, occurredAt, occurredAt),
-      config.db
-        .prepare(
-          `INSERT INTO sessions
-             (session_hash, github_id, created_at, expires_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .bind(
-          sessionHash,
-          user.githubId,
-          occurredAt,
-          occurredAt + SESSION_LIFETIME_SECONDS,
-        ),
       config.db
         .prepare(
           `INSERT INTO auth_codes
@@ -249,13 +234,6 @@ export function createCallbackHandler(
       ),
     ])
 
-    setCookie(c, SESSION_COOKIE_NAME, session, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'Lax',
-      path: '/',
-      maxAge: SESSION_LIFETIME_SECONDS,
-    })
     c.header('Cache-Control', 'no-store')
 
     const redirectUrl = new URL(oauthState.redirect_uri)

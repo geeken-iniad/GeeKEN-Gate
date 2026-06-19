@@ -68,12 +68,12 @@ describe('initial migration', () => {
         'frozen_users',
         'clients',
         'allowed_redirect_uris',
-        'sessions',
         'oauth_states',
         'auth_codes',
         'auth_events',
       ]),
     )
+    expect(tableNames).not.toContain('sessions')
   })
 
   it('creates all required indexes', async () => {
@@ -86,8 +86,6 @@ describe('initial migration', () => {
 
     expect(indexNames).toEqual(
       expect.arrayContaining([
-        'idx_sessions_github_id',
-        'idx_sessions_expires_at',
         'idx_oauth_states_expires_at',
         'idx_auth_codes_github_id',
         'idx_auth_codes_expires_at',
@@ -97,6 +95,8 @@ describe('initial migration', () => {
         'idx_auth_events_client_id_occurred_at',
       ]),
     )
+    expect(indexNames).not.toContain('idx_sessions_github_id')
+    expect(indexNames).not.toContain('idx_sessions_expires_at')
   })
 
   it('stores only the client secret hash', async () => {
@@ -132,11 +132,6 @@ describe('valid records', () => {
 
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO sessions
-           (session_hash, github_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?)`,
-      ).bind(HASH_A, '100', NOW, NOW + 60),
-      env.DB.prepare(
         `INSERT INTO oauth_states
            (state_hash, client_id, redirect_uri, created_at, expires_at)
          VALUES (?, ?, ?, ?, ?)`,
@@ -161,7 +156,6 @@ describe('valid records', () => {
       ),
     ])
 
-    expect(await countRows('sessions')).toBe(1)
     expect(await countRows('oauth_states')).toBe(1)
     expect(await countRows('auth_codes')).toBe(1)
   })
@@ -215,15 +209,10 @@ describe('uniqueness constraints', () => {
     await expect(insertClient()).rejects.toThrow()
   })
 
-  it('rejects duplicate session, state, and authorization code hashes', async () => {
+  it('rejects duplicate state and authorization code hashes', async () => {
     await insertUser()
     await insertClientWithRedirect()
     const statements = [
-      env.DB.prepare(
-        `INSERT INTO sessions
-           (session_hash, github_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?)`,
-      ).bind(HASH_A, '100', NOW, NOW + 60),
       env.DB.prepare(
         `INSERT INTO oauth_states
            (state_hash, client_id, redirect_uri, created_at, expires_at)
@@ -293,23 +282,6 @@ describe('hash constraints', () => {
   )
 
   it.each(invalidHashes)(
-    'rejects a %s session hash',
-    async (_caseName, hash) => {
-      await insertUser()
-
-      await expect(
-        env.DB.prepare(
-          `INSERT INTO sessions
-             (session_hash, github_id, created_at, expires_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-          .bind(hash, '100', NOW, NOW + 60)
-          .run(),
-      ).rejects.toThrow()
-    },
-  )
-
-  it.each(invalidHashes)(
     'rejects a %s OAuth state hash',
     async (_caseName, hash) => {
       await insertClientWithRedirect()
@@ -364,11 +336,6 @@ describe('time and value constraints', () => {
     await insertClientWithRedirect()
 
     const statements = [
-      env.DB.prepare(
-        `INSERT INTO sessions
-           (session_hash, github_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?)`,
-      ).bind(HASH_A, '100', NOW, NOW),
       env.DB.prepare(
         `INSERT INTO oauth_states
            (state_hash, client_id, redirect_uri, created_at, expires_at)
@@ -435,11 +402,6 @@ describe('time and value constraints', () => {
            (client_id, redirect_uri, created_at)
          VALUES (?, ?, ?)`,
       ).bind('client-a', 'https://client.example/other', 0),
-      env.DB.prepare(
-        `INSERT INTO sessions
-           (session_hash, github_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?)`,
-      ).bind(HASH_A, '100', 0, NOW),
       env.DB.prepare(
         `INSERT INTO oauth_states
            (state_hash, client_id, redirect_uri, created_at, expires_at)
@@ -532,18 +494,8 @@ describe('time and value constraints', () => {
 })
 
 describe('foreign keys and redirect URI matching', () => {
-  it('rejects sessions and authorization codes for missing users', async () => {
+  it('rejects authorization codes for missing users', async () => {
     await insertClientWithRedirect()
-
-    await expect(
-      env.DB.prepare(
-        `INSERT INTO sessions
-           (session_hash, github_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?)`,
-      )
-        .bind(HASH_A, 'missing-user', NOW, NOW + 60)
-        .run(),
-    ).rejects.toThrow()
 
     await expect(
       env.DB.prepare(
@@ -612,15 +564,10 @@ describe('foreign keys and redirect URI matching', () => {
 })
 
 describe('cascade deletion and audit retention', () => {
-  it('deletes sessions and authorization codes with their user', async () => {
+  it('deletes authorization codes with their user', async () => {
     await insertUser()
     await insertClientWithRedirect()
     await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO sessions
-           (session_hash, github_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?)`,
-      ).bind(HASH_A, '100', NOW, NOW + 60),
       env.DB.prepare(
         `INSERT INTO auth_codes
            (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
@@ -639,7 +586,6 @@ describe('cascade deletion and audit retention', () => {
       .bind('100')
       .run()
 
-    expect(await countRows('sessions')).toBe(0)
     expect(await countRows('auth_codes')).toBe(0)
   })
 
