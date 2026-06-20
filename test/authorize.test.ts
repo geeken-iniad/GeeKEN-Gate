@@ -8,6 +8,8 @@ import {
   CLIENT_ID,
   CODE_CHALLENGE,
   CODE_VERIFIER,
+  GOOGLE_CALLBACK_URL,
+  GOOGLE_CLIENT_ID,
   NONCE,
   REDIRECT_URI,
   TOKEN_HASH_SECRET,
@@ -196,26 +198,45 @@ describe('GET /authorize', () => {
     await expect(getOAuthStates()).resolves.toHaveLength(0)
   })
 
-  it('with provider=google renders a controlled unavailable page', async () => {
+  it('with provider=google stores a hashed upstream state and redirects to Google', async () => {
     const response = await requestAuthorize({
       code_challenge: codeChallenge,
       provider: 'google',
     })
 
-    expect(response.status).toBe(400)
-    expect(response.headers.get('content-type')).toContain('text/html')
+    expect(response.status).toBe(302)
     expect(response.headers.get('cache-control')).toBe('no-store')
 
-    const body = await text(response)
-    expect(body).toContain('Google sign-in is not available')
+    const location = new URL(response.headers.get('location') ?? '')
+    const upstreamState = location.searchParams.get('state')
 
-    const githubLinkMatch = body.match(/href="([^"]*provider=github[^"]*)"/)
-    expect(githubLinkMatch).not.toBeNull()
+    expect(location.origin + location.pathname).toBe(
+      'https://accounts.google.com/o/oauth2/v2/auth',
+    )
+    expect(location.searchParams.get('client_id')).toBe(GOOGLE_CLIENT_ID)
+    expect(location.searchParams.get('redirect_uri')).toBe(GOOGLE_CALLBACK_URL)
+    expect(location.searchParams.get('response_type')).toBe('code')
+    expect(location.searchParams.get('scope')).toBe('openid email')
+    expect(upstreamState).toMatch(/^[A-Za-z0-9_-]{43}$/)
 
-    const githubLink = new URL(decodeHtmlEntities(githubLinkMatch![1]!))
-    expectPreservedAuthorizeRequest(githubLink, 'github', codeChallenge)
-
-    await expect(getOAuthStates()).resolves.toHaveLength(0)
+    const rows = await getOAuthStates()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      client_state: CLIENT_STATE,
+      client_id: CLIENT_ID,
+      redirect_uri: REDIRECT_URI,
+      nonce: NONCE,
+      code_challenge: codeChallenge,
+      provider: 'google',
+    })
+    expect(rows[0].upstream_state_hash).not.toBe(upstreamState)
+    await expect(
+      hashAuthToken(
+        upstreamState ?? '',
+        TOKEN_HASH_SECRET,
+        'oauth-upstream-state',
+      ),
+    ).resolves.toBe(rows[0].upstream_state_hash)
   })
 
   it('rejects duplicate provider parameters', async () => {

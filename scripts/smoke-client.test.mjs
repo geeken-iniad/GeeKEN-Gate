@@ -57,6 +57,7 @@ describe('smoke client configuration', () => {
     assert.equal(config.clientId, 'smoke-client')
     assert.equal(config.redirectUri, 'http://localhost:3000/callback')
     assert.equal(config.port, 3000)
+    assert.equal(config.provider, 'github')
   })
 
   it('rejects missing required environment variables', () => {
@@ -66,6 +67,18 @@ describe('smoke client configuration', () => {
 
       assert.throws(() => loadConfig(environment), new RegExp(name))
     }
+  })
+
+  it('defaults the provider to github and allows google', () => {
+    assert.equal(createConfig().provider, 'github')
+    assert.equal(
+      loadConfig({ ...ENVIRONMENT, SMOKE_PROVIDER: 'google' }).provider,
+      'google',
+    )
+    assert.throws(
+      () => loadConfig({ ...ENVIRONMENT, SMOKE_PROVIDER: 'microsoft' }),
+      /SMOKE_PROVIDER/,
+    )
   })
 
   it('requires the redirect URI to match the localhost port and callback path', () => {
@@ -103,6 +116,14 @@ describe('smoke client requests', () => {
     assert.equal(authorizeUrl.searchParams.get('code_challenge'), pkce.challenge)
     assert.equal(authorizeUrl.searchParams.get('code_challenge_method'), 'S256')
     assert.equal(authorizeUrl.searchParams.get('provider'), 'github')
+  })
+
+  it('uses the configured provider in the authorize URL', () => {
+    const pkce = generatePKCE()
+    const googleConfig = loadConfig({ ...ENVIRONMENT, SMOKE_PROVIDER: 'google' })
+    const authorizeUrl = new URL(buildAuthorizeUrl(googleConfig, pkce))
+
+    assert.equal(authorizeUrl.searchParams.get('provider'), 'google')
   })
 
   it('uses public client form data for code exchange', async () => {

@@ -6,6 +6,7 @@ import { generateRandomToken, hashAuthToken } from '../lib/crypto'
 import { enforceRateLimit, getClientIp } from '../lib/rate-limit'
 
 const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize'
+const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 const OAUTH_STATE_LIFETIME_SECONDS = 10 * 60
 
 type AppContext = Context<{ Bindings: AppBindings }>
@@ -178,35 +179,7 @@ function renderProviderSelection(c: AppContext, params: AuthorizeParams): Respon
   return c.html(html)
 }
 
-function renderProviderUnavailable(
-  c: AppContext,
-  params: AuthorizeParams,
-): Response {
-  const requestUrl = new URL(c.req.url)
-  requestUrl.searchParams.set('provider', 'github')
 
-  const html = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in unavailable - GeeKEN Gate</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 360px; margin: 60px auto; padding: 0 20px; }
-    p { margin-bottom: 1rem; }
-    a { color: #0969da; }
-  </style>
-</head>
-<body>
-  <p>Google sign-in is not available in this phase.</p>
-  <p><a href="${escapeHtml(requestUrl.href)}">Continue with GitHub</a></p>
-</body>
-</html>`
-
-  c.header('Cache-Control', 'no-store')
-
-  return c.html(html, 400)
-}
 
 export async function handleAuthorize(c: AppContext): Promise<Response> {
   const rateLimitResponse = await enforceRateLimit(
@@ -258,10 +231,6 @@ export async function handleAuthorize(c: AppContext): Promise<Response> {
     return renderProviderSelection(c, params)
   }
 
-  if (provider === 'google') {
-    return renderProviderUnavailable(c, params)
-  }
-
   const upstreamState = generateRandomToken()
   const upstreamStateHash = await hashAuthToken(
     upstreamState,
@@ -291,13 +260,24 @@ export async function handleAuthorize(c: AppContext): Promise<Response> {
     )
     .run()
 
+  c.header('Cache-Control', 'no-store')
+
+  if (provider === 'google') {
+    const authorizeUrl = new URL(GOOGLE_AUTHORIZE_URL)
+    authorizeUrl.searchParams.set('client_id', config.googleClientId)
+    authorizeUrl.searchParams.set('redirect_uri', config.googleCallbackUrl.href)
+    authorizeUrl.searchParams.set('response_type', 'code')
+    authorizeUrl.searchParams.set('scope', 'openid email')
+    authorizeUrl.searchParams.set('state', upstreamState)
+
+    return c.redirect(authorizeUrl.href)
+  }
+
   const authorizeUrl = new URL(GITHUB_AUTHORIZE_URL)
   authorizeUrl.searchParams.set('client_id', config.githubClientId)
   authorizeUrl.searchParams.set('redirect_uri', config.githubCallbackUrl.href)
   authorizeUrl.searchParams.set('scope', 'read:org')
   authorizeUrl.searchParams.set('state', upstreamState)
-
-  c.header('Cache-Control', 'no-store')
 
   return c.redirect(authorizeUrl.href)
 }

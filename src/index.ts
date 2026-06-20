@@ -5,6 +5,7 @@ import type { AppBindings } from './lib/config'
 import { enforceRateLimit } from './lib/rate-limit'
 import { handleAuthorize } from './routes/authorize'
 import { handleCallbackGitHub } from './routes/callback-github'
+import { handleCallbackGoogle } from './routes/callback-google'
 import { handleDiscovery } from './routes/discovery'
 import { handleJwks } from './routes/jwks'
 import { handleToken } from './routes/token'
@@ -16,6 +17,7 @@ app.get('/.well-known/openid-configuration', handleDiscovery)
 app.get('/jwks.json', handleJwks)
 app.get('/authorize', handleAuthorize)
 app.get('/callback/github', handleCallbackGitHub)
+app.get('/callback/google', handleCallbackGoogle)
 app.post('/token', handleToken)
 app.get('/userinfo', handleUserinfo)
 app.post('/userinfo', handleUserinfo)

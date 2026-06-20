@@ -5,6 +5,8 @@ import {
   generateCodeVerifier,
   generateRandomToken,
   hashAuthToken,
+  hashEmailAddress,
+  normalizeEmail,
   verifyHashedToken,
 } from '../src/lib/crypto'
 
@@ -140,5 +142,43 @@ describe('hash verification', () => {
         'auth-code',
       ),
     ).resolves.toBe(false)
+  })
+})
+
+describe('email normalization and hashing', () => {
+  it('normalizes email with trim and lower case', () => {
+    expect(normalizeEmail('  User@Example.COM  ')).toBe('user@example.com')
+  })
+
+  it('returns a deterministic lowercase SHA-256 HMAC for email', async () => {
+    const firstHash = await hashEmailAddress(
+      'user@example.com',
+      'pepper-secret',
+    )
+    const secondHash = await hashEmailAddress(
+      'user@example.com',
+      'pepper-secret',
+    )
+
+    expect(firstHash).toMatch(LOWERCASE_SHA256_HEX)
+    expect(secondHash).toBe(firstHash)
+  })
+
+  it('produces different email hashes for different peppers or addresses', async () => {
+    const [samePepperDifferentEmail, differentPepperSameEmail] =
+      await Promise.all([
+        hashEmailAddress('other@example.com', 'pepper-secret'),
+        hashEmailAddress('user@example.com', 'other-pepper'),
+      ])
+    const original = await hashEmailAddress('user@example.com', 'pepper-secret')
+
+    expect(samePepperDifferentEmail).not.toBe(original)
+    expect(differentPepperSameEmail).not.toBe(original)
+  })
+
+  it('rejects an empty email HMAC pepper', async () => {
+    await expect(
+      hashEmailAddress('user@example.com', ''),
+    ).rejects.toThrow('Email HMAC pepper must not be empty')
   })
 })
