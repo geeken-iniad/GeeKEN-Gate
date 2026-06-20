@@ -12,7 +12,7 @@ const database = {
   batch() {},
 } as unknown as D1Database
 const TOKEN_HASH_SECRET = 't'.repeat(32)
-const GITHUB_CALLBACK_URL = 'https://auth.example.com/callback'
+const GITHUB_CALLBACK_URL = 'https://auth.example.com/callback/github'
 
 function createBindings(
   overrides: Partial<AppBindings> = {},
@@ -98,9 +98,9 @@ describe('loadAuthServerConfig', () => {
   })
 
   it.each([
-    'http://localhost:8787/callback',
-    'http://127.0.0.1:8787/callback',
-    'http://[::1]:8787/callback',
+    'http://localhost:8787/callback/github',
+    'http://127.0.0.1:8787/callback/github',
+    'http://[::1]:8787/callback/github',
   ])('allows a loopback HTTP callback URL: %s', async (callbackUrl) => {
     const config = await loadAuthServerConfig(
       createBindings({

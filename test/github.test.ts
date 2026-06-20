@@ -12,7 +12,7 @@ function createOptions(fetchMock: ReturnType<typeof vi.fn>): GitHubAuthOptions {
   return {
     clientId: 'github-client-id',
     clientSecret: 'github-client-secret',
-    callbackUrl: new URL('https://auth.example.com/callback'),
+    callbackUrl: new URL('https://auth.example.com/callback/github'),
     organization: 'example-org',
     fetch: fetchMock as typeof globalThis.fetch,
   }
@@ -93,7 +93,7 @@ describe('authenticateGitHubUser', () => {
           client_id: 'github-client-id',
           client_secret: 'github-client-secret',
           code: 'github-oauth-code',
-          redirect_uri: 'https://auth.example.com/callback',
+          redirect_uri: 'https://auth.example.com/callback/github',
         }).toString(),
       },
     )
