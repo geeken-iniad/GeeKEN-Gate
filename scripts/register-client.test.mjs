@@ -3,7 +3,6 @@ import { describe, it } from 'node:test'
 
 import {
   buildRegistrationSql,
-  generateClientCredential,
   parseArguments,
   registerClient,
   validateClientId,
@@ -11,22 +10,11 @@ import {
 } from './register-client.mjs'
 
 describe('register-client operations', () => {
-  it('generates a 32-byte URL-safe secret and SHA-256 hash', () => {
-    const { clientSecret, clientSecretHash } = generateClientCredential()
-
-    assert.match(clientSecret, /^[A-Za-z0-9_-]{43}$/)
-    assert.match(clientSecretHash, /^[0-9a-f]{64}$/)
-  })
-
-  it('registers the hash and prints the plaintext secret only after success', () => {
+  it('registers a public client without generating a secret', () => {
     const calls = []
     const result = registerClient(
       ['--local', 'client-a', 'https://client.example/callback'],
       {
-        generateClientCredential: () => ({
-          clientSecret: 'plaintext-secret',
-          clientSecretHash: 'a'.repeat(64),
-        }),
         now: () => 1_800_000_000,
         runWrangler: (arguments_) => {
           calls.push(arguments_)
@@ -36,7 +24,6 @@ describe('register-client operations', () => {
 
     assert.deepEqual(result, {
       clientId: 'client-a',
-      clientSecret: 'plaintext-secret',
       redirectUri: 'https://client.example/callback',
     })
     assert.equal(calls.length, 1)
@@ -50,20 +37,15 @@ describe('register-client operations', () => {
     ])
     assert.match(calls[0][6], /INSERT INTO clients/)
     assert.match(calls[0][6], /INSERT INTO allowed_redirect_uris/)
-    assert.match(calls[0][6], new RegExp('a'.repeat(64)))
-    assert.doesNotMatch(calls[0][6], /plaintext-secret/)
+    assert.doesNotMatch(calls[0][6], /client_secret/)
   })
 
-  it('does not return the secret when D1 registration fails', () => {
+  it('does not return a secret when D1 registration fails', () => {
     assert.throws(
       () =>
         registerClient(
           ['--remote', 'client-a', 'https://client.example/callback'],
           {
-            generateClientCredential: () => ({
-              clientSecret: 'plaintext-secret',
-              clientSecretHash: 'a'.repeat(64),
-            }),
             runWrangler: () => {
               throw new Error('D1 registration failed')
             },
@@ -92,13 +74,13 @@ describe('register-client operations', () => {
   it('escapes SQL string values', () => {
     const sql = buildRegistrationSql({
       clientId: "client'a",
-      clientSecretHash: 'a'.repeat(64),
       redirectUri: "https://client.example/callback?value='",
       createdAt: 1_800_000_000,
     })
 
     assert.match(sql, /client''a/)
     assert.match(sql, /value=''/)
+    assert.doesNotMatch(sql, /client_secret/)
   })
 
   it('requires exactly one target and two positional arguments', () => {

@@ -1,4 +1,3 @@
-import { randomBytes, createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -70,29 +69,15 @@ export function validateRedirectUri(value) {
   return redirectUri.href
 }
 
-export function generateClientCredential() {
-  const clientSecret = randomBytes(32).toString('base64url')
-  const clientSecretHash = createHash('sha256')
-    .update(clientSecret, 'utf8')
-    .digest('hex')
-
-  return { clientSecret, clientSecretHash }
-}
-
 function quoteSql(value) {
   return `'${value.replaceAll("'", "''")}'`
 }
 
-export function buildRegistrationSql({
-  clientId,
-  clientSecretHash,
-  redirectUri,
-  createdAt,
-}) {
+export function buildRegistrationSql({ clientId, redirectUri, createdAt }) {
   return `INSERT INTO clients
-  (client_id, client_secret_hash, created_at)
+  (client_id, created_at)
 VALUES
-  (${quoteSql(clientId)}, ${quoteSql(clientSecretHash)}, ${createdAt});
+  (${quoteSql(clientId)}, ${createdAt});
 INSERT INTO allowed_redirect_uris
   (client_id, redirect_uri, created_at)
 VALUES
@@ -121,21 +106,14 @@ export function runWrangler(arguments_, options = {}) {
   return result
 }
 
-export function registerClient(
-  arguments_,
-  dependencies = {},
-) {
+export function registerClient(arguments_, dependencies = {}) {
   const { target, clientId, redirectUri } = parseArguments(arguments_)
   const validatedClientId = validateClientId(clientId)
   const validatedRedirectUri = validateRedirectUri(redirectUri)
-  const createCredential =
-    dependencies.generateClientCredential ?? generateClientCredential
   const executeWrangler = dependencies.runWrangler ?? runWrangler
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000))
-  const credential = createCredential()
   const sql = buildRegistrationSql({
     clientId: validatedClientId,
-    clientSecretHash: credential.clientSecretHash,
     redirectUri: validatedRedirectUri,
     createdAt: now(),
   })
@@ -152,7 +130,6 @@ export function registerClient(
 
   return {
     clientId: validatedClientId,
-    clientSecret: credential.clientSecret,
     redirectUri: validatedRedirectUri,
   }
 }
@@ -161,11 +138,10 @@ function main() {
   try {
     const result = registerClient(process.argv.slice(2))
 
-    console.log('Client registered successfully.')
+    console.log('Public OIDC client registered successfully.')
     console.log(`Client ID: ${result.clientId}`)
-    console.log(`Client secret: ${result.clientSecret}`)
     console.log(`Redirect URI: ${result.redirectUri}`)
-    console.log('Store the client secret now; it cannot be recovered.')
+    console.log('No client secret is generated; clients must use PKCE.')
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
     process.exitCode = 1

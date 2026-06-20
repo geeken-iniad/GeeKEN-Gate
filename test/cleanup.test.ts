@@ -1,6 +1,6 @@
 import {
-  createScheduledController,
   createExecutionContext,
+  createScheduledController,
 } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -18,15 +18,13 @@ const REDIRECT_URI = 'https://client.example/callback'
 async function insertCleanupFixtures(): Promise<void> {
   await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO users
-         (github_id, github_login, created_at, updated_at)
-       VALUES (?, ?, ?, ?)`,
-    ).bind('100', 'octocat', CURRENT_TIME - 100, CURRENT_TIME - 100),
-    env.DB.prepare(
-      `INSERT INTO clients
-         (client_id, client_secret_hash, created_at)
+      `INSERT INTO users (id, created_at, updated_at)
        VALUES (?, ?, ?)`,
-    ).bind('client-a', HASH_A, CURRENT_TIME - 100),
+    ).bind('user-a', CURRENT_TIME - 100, CURRENT_TIME - 100),
+    env.DB.prepare(
+      `INSERT INTO clients (client_id, created_at)
+       VALUES (?, ?)`,
+    ).bind('client-a', CURRENT_TIME - 100),
     env.DB.prepare(
       `INSERT INTO allowed_redirect_uris
          (client_id, redirect_uri, created_at)
@@ -37,92 +35,170 @@ async function insertCleanupFixtures(): Promise<void> {
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO oauth_states
-         (state_hash, client_id, redirect_uri, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
+         (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+          code_challenge, code_challenge_method, provider, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       HASH_A,
+      'state-a',
       'client-a',
       REDIRECT_URI,
+      'nonce',
+      'challenge',
+      'S256',
+      'github',
       CURRENT_TIME - 100,
       CURRENT_TIME - 1,
     ),
     env.DB.prepare(
       `INSERT INTO oauth_states
-         (state_hash, client_id, redirect_uri, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
+         (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+          code_challenge, code_challenge_method, provider, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       HASH_B,
+      'state-b',
       'client-a',
       REDIRECT_URI,
+      'nonce',
+      'challenge',
+      'S256',
+      'github',
       CURRENT_TIME - 100,
       CURRENT_TIME,
     ),
     env.DB.prepare(
       `INSERT INTO oauth_states
-         (state_hash, client_id, redirect_uri, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
+         (upstream_state_hash, client_state, client_id, redirect_uri, nonce,
+          code_challenge, code_challenge_method, provider, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       HASH_C,
+      'state-c',
       'client-a',
       REDIRECT_URI,
+      'nonce',
+      'challenge',
+      'S256',
+      'github',
       CURRENT_TIME - 100,
       CURRENT_TIME + 1,
     ),
     env.DB.prepare(
       `INSERT INTO auth_codes
-         (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (code_hash, user_id, client_id, redirect_uri, nonce,
+          code_challenge, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       HASH_A,
-      '100',
+      'user-a',
       'client-a',
       REDIRECT_URI,
+      'nonce',
+      'challenge',
       CURRENT_TIME - 100,
       CURRENT_TIME - 1,
     ),
     env.DB.prepare(
       `INSERT INTO auth_codes
-         (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (code_hash, user_id, client_id, redirect_uri, nonce,
+          code_challenge, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       HASH_B,
-      '100',
+      'user-a',
       'client-a',
       REDIRECT_URI,
+      'nonce',
+      'challenge',
       CURRENT_TIME - 100,
       CURRENT_TIME,
     ),
     env.DB.prepare(
       `INSERT INTO auth_codes
-         (code_hash, github_id, client_id, redirect_uri, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (code_hash, user_id, client_id, redirect_uri, nonce,
+          code_challenge, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       HASH_C,
-      '100',
+      'user-a',
       'client-a',
       REDIRECT_URI,
+      'nonce',
+      'challenge',
       CURRENT_TIME - 100,
       CURRENT_TIME + 1,
     ),
     env.DB.prepare(
-      `INSERT INTO auth_events
-         (event_type, success, occurred_at)
+      `INSERT INTO access_tokens
+         (token_hash, user_id, client_id, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(HASH_A, 'user-a', 'client-a', CURRENT_TIME - 100, CURRENT_TIME - 1),
+    env.DB.prepare(
+      `INSERT INTO access_tokens
+         (token_hash, user_id, client_id, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(HASH_B, 'user-a', 'client-a', CURRENT_TIME - 100, CURRENT_TIME),
+    env.DB.prepare(
+      `INSERT INTO access_tokens
+         (token_hash, user_id, client_id, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(HASH_C, 'user-a', 'client-a', CURRENT_TIME - 100, CURRENT_TIME + 1),
+    env.DB.prepare(
+      `INSERT INTO refresh_tokens
+         (token_hash, user_id, client_id, created_at, expires_at, revoked_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      HASH_A,
+      'user-a',
+      'client-a',
+      CURRENT_TIME - 100,
+      CURRENT_TIME - 1,
+      null,
+    ),
+    env.DB.prepare(
+      `INSERT INTO refresh_tokens
+         (token_hash, user_id, client_id, created_at, expires_at, revoked_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      HASH_B,
+      'user-a',
+      'client-a',
+      CURRENT_TIME - 100,
+      CURRENT_TIME,
+      null,
+    ),
+    env.DB.prepare(
+      `INSERT INTO refresh_tokens
+         (token_hash, user_id, client_id, created_at, expires_at, revoked_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      HASH_C,
+      'user-a',
+      'client-a',
+      CURRENT_TIME - 100,
+      CURRENT_TIME + 1,
+      null,
+    ),
+    env.DB.prepare(
+      `INSERT INTO auth_events (event_type, success, occurred_at)
        VALUES (?, ?, ?)`,
     ).bind('old', 1, CURRENT_TIME - SIXTY_DAYS_SECONDS - 1),
     env.DB.prepare(
-      `INSERT INTO auth_events
-         (event_type, success, occurred_at)
+      `INSERT INTO auth_events (event_type, success, occurred_at)
        VALUES (?, ?, ?)`,
     ).bind('boundary', 1, CURRENT_TIME - SIXTY_DAYS_SECONDS),
     env.DB.prepare(
-      `INSERT INTO auth_events
-         (event_type, success, occurred_at)
+      `INSERT INTO auth_events (event_type, success, occurred_at)
        VALUES (?, ?, ?)`,
     ).bind('recent', 1, CURRENT_TIME - SIXTY_DAYS_SECONDS + 1),
   ])
 }
 
-async function getHashes(table: string, column: string): Promise<string[]> {
+async function getHashes(
+  table: string,
+  column: string,
+): Promise<string[]> {
   const result = await env.DB.prepare(
     `SELECT ${column} AS hash FROM ${table} ORDER BY ${column}`,
   ).all<{ hash: string }>()
@@ -146,10 +222,16 @@ describe('cleanupExpiredAuthData', () => {
   it('deletes expired credentials and audit events older than 60 days', async () => {
     await cleanupExpiredAuthData(env.DB, CURRENT_TIME)
 
-    await expect(getHashes('oauth_states', 'state_hash')).resolves.toEqual([
+    await expect(getHashes('oauth_states', 'upstream_state_hash')).resolves.toEqual([
       HASH_C,
     ])
     await expect(getHashes('auth_codes', 'code_hash')).resolves.toEqual([
+      HASH_C,
+    ])
+    await expect(getHashes('access_tokens', 'token_hash')).resolves.toEqual([
+      HASH_C,
+    ])
+    await expect(getHashes('refresh_tokens', 'token_hash')).resolves.toEqual([
       HASH_C,
     ])
     await expect(getEventTypes()).resolves.toEqual(['boundary', 'recent'])
@@ -174,10 +256,16 @@ describe('scheduled cleanup handler', () => {
 
     await scheduled(controller, env, executionContext)
 
-    await expect(getHashes('oauth_states', 'state_hash')).resolves.toEqual([
+    await expect(getHashes('oauth_states', 'upstream_state_hash')).resolves.toEqual([
       HASH_C,
     ])
     await expect(getHashes('auth_codes', 'code_hash')).resolves.toEqual([
+      HASH_C,
+    ])
+    await expect(getHashes('access_tokens', 'token_hash')).resolves.toEqual([
+      HASH_C,
+    ])
+    await expect(getHashes('refresh_tokens', 'token_hash')).resolves.toEqual([
       HASH_C,
     ])
     await expect(getEventTypes()).resolves.toEqual(['boundary', 'recent'])

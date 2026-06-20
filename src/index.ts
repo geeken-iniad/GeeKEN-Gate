@@ -3,15 +3,22 @@ import { Hono } from 'hono'
 import { cleanupExpiredAuthData } from './lib/cleanup'
 import type { AppBindings } from './lib/config'
 import { enforceRateLimit } from './lib/rate-limit'
+import { handleAuthorize } from './routes/authorize'
 import { handleCallback } from './routes/callback'
-import { handleExchange } from './routes/exchange'
-import { handleLogin } from './routes/login'
+import { handleDiscovery } from './routes/discovery'
+import { handleJwks } from './routes/jwks'
+import { handleToken } from './routes/token'
+import { handleUserinfo } from './routes/userinfo'
 
 export const app = new Hono<{ Bindings: AppBindings }>()
 
-app.get('/login', handleLogin)
+app.get('/.well-known/openid-configuration', handleDiscovery)
+app.get('/jwks.json', handleJwks)
+app.get('/authorize', handleAuthorize)
 app.get('/callback', handleCallback)
-app.post('/exchange', handleExchange)
+app.post('/token', handleToken)
+app.get('/userinfo', handleUserinfo)
+app.post('/userinfo', handleUserinfo)
 
 app.get('/health', async (c) => {
   const rateLimitResponse = await enforceRateLimit(
