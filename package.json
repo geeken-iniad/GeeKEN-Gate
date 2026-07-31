@@ -28,12 +28,12 @@
     "node": ">=24 <25"
   },
   "dependencies": {
-    "hono": "^4.12.25"
+    "hono": "^4.12.32"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.14",
+    "@cloudflare/vitest-pool-workers": "^0.18.8",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8",
-    "wrangler": "^4.99.0"
+    "vitest": "^4.1.10",
+    "wrangler": "^4.114.0"
   }
 }
