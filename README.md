@@ -6,7 +6,7 @@ Hono、D1ベースの認証サーバーです。
 ## Requirements
 
 - Node.js 24
-- pnpm 11.6.0
+- pnpm 11.11.0
 - CloudflareアカウントとWranglerログイン
 - 試験または運用対象のGitHub Organization
 - GitHub OAuth App
@@ -208,11 +208,11 @@ GitHub OAuth Appのcallback URLを公開Workerの`/callback`へ変更します�
 - `master`へのpush: validation成功後にremote D1 migrationを適用し、Workerをdeployします。
 - manual dispatch: 選択refが`refs/heads/master`の場合だけ、pushと同じdeployを実行します。
 
-CIはNode.js 24とpnpm 11.6.0を使用し、各validationで次のコマンドを実行します。
+CIはNode.js 24とpnpm 11.11.0を使用し、各validationで次のコマンドを実行します。
 
 ```bash
 corepack enable
-corepack prepare pnpm@11.6.0 --activate
+corepack prepare pnpm@11.11.0 --activate
 pnpm install --frozen-lockfile
 pnpm check
 ```

@@ -18,7 +18,7 @@
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "11.6.0",
+      "version": "11.11.0",
       "onFail": "download"
     }
   },
@@ -28,12 +28,12 @@
     "node": ">=24 <25"
   },
   "dependencies": {
-    "hono": "^4.12.25"
+    "hono": "^4.13.13"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.14",
+    "@cloudflare/vitest-pool-workers": "^0.16.20",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8",
-    "wrangler": "^4.99.0"
+    "vitest": "^4.1.12",
+    "wrangler": "^4.152.0"
   }
 }
